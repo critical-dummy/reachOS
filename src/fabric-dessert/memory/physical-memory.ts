@@ -1,4 +1,8 @@
-import {Address64, Size64} from '../types';
+import {
+  Address64,
+  assertValidRegionRange,
+  Size64,
+} from '../types';
 import {IMemoryRegionDescriptor, MemoryPermissions, MemoryRegionType} from './types';
 
 const PAGE_SIZE_BYTES = 65536; // 64 KiB sparse allocation granule
@@ -37,9 +41,7 @@ export class SparsePhysicalMemoryRegion implements IPhysicalMemoryRegion {
     type: MemoryRegionType,
     permissions: MemoryPermissions
   ) {
-    if (size <= 0n) {
-      throw new Error(`Memory region size must be > 0, received ${size}`);
-    }
+    assertValidRegionRange(baseAddress, size, `Memory region "${name}"`);
     this.id = id;
     this.name = name;
     this.baseAddress = baseAddress;

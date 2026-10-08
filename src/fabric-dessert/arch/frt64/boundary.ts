@@ -7,7 +7,7 @@ import {
   Frt64TopologyConfig,
   InstructionFetchResult,
 } from './types';
-import {Address64} from '../../types';
+import {Address64, assertValidAddress64} from '../../types';
 
 export interface IFrt64BusMaster {
   readPhysical(address: Address64, sizeBytes: number): Uint8Array;
@@ -74,7 +74,9 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     this.clusterId = config.clusterId ?? 0;
     this.isPrimary = config.isPrimary ?? (config.coreId === 0);
     this.activeFamily = config.initialFamily;
-    this.currentResetVector = config.resetVector ?? 0n;
+    const initialReset = config.resetVector ?? 0n;
+    assertValidAddress64(initialReset, 'core resetVector');
+    this.currentResetVector = initialReset;
     this.currentPc = this.currentResetVector;
     this.runState = this.isPrimary ? Frt64CoreRunState.RESET : Frt64CoreRunState.PARKED;
   }
@@ -88,10 +90,12 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   }
 
   setResetVector(vector: Address64): void {
+    assertValidAddress64(vector, 'setResetVector');
     this.currentResetVector = vector;
   }
 
   setProgramCounter(address: Address64): void {
+    assertValidAddress64(address, 'setProgramCounter');
     this.currentPc = address;
   }
 
@@ -126,6 +130,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
 
   reset(vector?: Address64): void {
     if (vector !== undefined) {
+      assertValidAddress64(vector, 'core reset vector');
       this.currentResetVector = vector;
     }
     this.currentPc = this.currentResetVector;
@@ -163,6 +168,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       return false;
     }
     if (entryVector !== undefined) {
+      assertValidAddress64(entryVector, 'unpark entryVector');
       this.currentResetVector = entryVector;
       this.currentPc = entryVector;
     }
@@ -301,12 +307,16 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
   }
 
   setResetVectorAll(vector: Address64): void {
+    assertValidAddress64(vector, 'setResetVectorAll vector');
     for (const core of this.cores) {
       core.setResetVector(vector);
     }
   }
 
   resetAll(vector?: Address64): void {
+    if (vector !== undefined) {
+      assertValidAddress64(vector, 'resetAll vector');
+    }
     for (const core of this.cores) {
       core.reset(vector);
     }

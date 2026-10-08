@@ -1,4 +1,11 @@
-import {Address64, formatAddress, Size64} from '../types';
+import {
+  Address64,
+  assertValidAddress64,
+  assertValidRegionRange,
+  formatAddress,
+  MAX_ADDRESS_64,
+  Size64,
+} from '../types';
 import {IPhysicalAddressSpace} from '../memory/address-space';
 import {DeviceRegistrationRecord, IDevice, IDeviceContext} from './types';
 
@@ -32,6 +39,7 @@ export class DeviceBus implements IDeviceBus {
   private nextIrqVector = 16; // Standard user IRQs starting at vector 16
 
   constructor(config: IDeviceBusConfig, addressSpace: IPhysicalAddressSpace) {
+    assertValidRegionRange(config.mmioWindowBase, config.mmioWindowSize, 'DeviceBus MMIO window');
     this.mmioWindowBase = config.mmioWindowBase;
     this.mmioWindowSize = config.mmioWindowSize;
     this.nextFreeMmioAddress = config.mmioWindowBase;
@@ -62,6 +70,16 @@ export class DeviceBus implements IDeviceBus {
       const alignment = req.alignment ?? 4096n; // default 4KB page align
       const alignedBase = this.alignUp(this.nextFreeMmioAddress, alignment);
       const apertureEnd = alignedBase + req.size;
+
+      assertValidAddress64(alignedBase, `Device "${device.id}" aperture "${req.name}" base`);
+      if (req.size <= 0n) {
+        throw new Error(`Device "${device.id}" aperture "${req.name}" size must be > 0`);
+      }
+      if (alignedBase + req.size - 1n > MAX_ADDRESS_64) {
+        throw new Error(
+          `Device "${device.id}" aperture "${req.name}" exceeds 64-bit physical address space limit`
+        );
+      }
 
       if (apertureEnd > this.mmioWindowBase + this.mmioWindowSize) {
         throw new Error(

@@ -1,4 +1,11 @@
-import {Address64, formatAddress, Size64} from '../types';
+import {
+  Address64,
+  assertValidAddress64,
+  assertValidRegionRange,
+  formatAddress,
+  MAX_ADDRESS_64,
+  Size64,
+} from '../types';
 import {IPhysicalMemoryRegion} from './physical-memory';
 import {IMemoryRegionDescriptor} from './types';
 
@@ -73,6 +80,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   mapRegion(region: IPhysicalMemoryRegion): void {
+    assertValidRegionRange(region.baseAddress, region.size, `Region "${region.name}"`);
     this.assertNoOverlap(region.baseAddress, region.size, region.id);
     this.regions.push(region);
   }
@@ -87,6 +95,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   mapMMIO(descriptor: IMMIORangeDescriptor): void {
+    assertValidRegionRange(descriptor.baseAddress, descriptor.size, `MMIO range "${descriptor.name}"`);
     this.assertNoOverlap(descriptor.baseAddress, descriptor.size, descriptor.id);
     this.mmioRanges.push(descriptor);
   }
@@ -101,12 +110,14 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   getRegionAt(address: Address64): IPhysicalMemoryRegion | undefined {
+    assertValidAddress64(address, 'getRegionAt address');
     return this.regions.find(
       (r) => address >= r.baseAddress && address < r.baseAddress + r.size
     );
   }
 
   getMMIOAt(address: Address64): IMMIORangeDescriptor | undefined {
+    assertValidAddress64(address, 'getMMIOAt address');
     return this.mmioRanges.find(
       (m) => address >= m.baseAddress && address < m.baseAddress + m.size
     );
@@ -120,7 +131,23 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     return [...this.mmioRanges];
   }
 
+  private checkAccessRange(address: Address64, count: number): void {
+    assertValidAddress64(address, 'Physical access address');
+    if (count < 0) {
+      throw new Error(`Invalid access byte count: ${count}`);
+    }
+    if (count > 0) {
+      const lastByte = address + BigInt(count) - 1n;
+      if (lastByte > MAX_ADDRESS_64) {
+        throw new Error(
+          `Physical access at ${formatAddress(address)} with size ${count} exceeds 64-bit physical address space limit`
+        );
+      }
+    }
+  }
+
   read8(address: Address64): number {
+    this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
       return region.read8(address - region.baseAddress);
@@ -133,6 +160,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   read16(address: Address64): number {
+    this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
       return region.read16(address - region.baseAddress);
@@ -145,6 +173,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   read32(address: Address64): number {
+    this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
       return region.read32(address - region.baseAddress);
@@ -157,6 +186,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   read64(address: Address64): bigint {
+    this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
       return region.read64(address - region.baseAddress);
@@ -169,6 +199,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   write8(address: Address64, value: number): void {
+    this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
       region.write8(address - region.baseAddress, value);
@@ -183,6 +214,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   write16(address: Address64, value: number): void {
+    this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
       region.write16(address - region.baseAddress, value);
@@ -197,6 +229,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   write32(address: Address64, value: number): void {
+    this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
       region.write32(address - region.baseAddress, value);
@@ -211,6 +244,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   write64(address: Address64, value: bigint): void {
+    this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
       region.write64(address - region.baseAddress, value);
@@ -225,6 +259,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   readBytes(address: Address64, count: number): Uint8Array {
+    this.checkAccessRange(address, count);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(count) <= region.baseAddress + region.size) {
       return region.readBytes(address - region.baseAddress, count);
@@ -237,6 +272,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   writeBytes(address: Address64, data: Uint8Array): void {
+    this.checkAccessRange(address, data.length);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(data.length) <= region.baseAddress + region.size) {
       region.writeBytes(address - region.baseAddress, data);
@@ -248,9 +284,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
   }
 
   fetchInstructionBytes(address: Address64, count: number): Uint8Array {
-    if (count <= 0) {
-      throw new Error(`Invalid fetch instruction byte count: ${count}`);
-    }
+    this.checkAccessRange(address, count);
 
     const region = this.getRegionAt(address);
     if (!region) {

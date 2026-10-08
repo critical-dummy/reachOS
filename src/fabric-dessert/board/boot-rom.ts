@@ -1,4 +1,10 @@
-import {Address64, formatAddress, Size64} from '../types';
+import {
+  Address64,
+  assertValidAddress64,
+  assertValidRegionRange,
+  formatAddress,
+  Size64,
+} from '../types';
 import {IPhysicalMemoryRegion} from '../memory/physical-memory';
 import {MemoryPermissions, MemoryRegionType} from '../memory/types';
 
@@ -37,10 +43,9 @@ export class BootRom implements IBootRom {
     resetEntry: Address64 = baseAddress,
     initialPayload?: Uint8Array
   ) {
-    if (size <= 0n) {
-      throw new Error(`Boot ROM size must be positive, received: ${size}`);
-    }
+    assertValidRegionRange(baseAddress, size, 'Boot ROM');
 
+    assertValidAddress64(resetEntry, 'Boot ROM resetEntry');
     if (resetEntry < baseAddress || resetEntry >= baseAddress + size) {
       throw new Error(
         `Reset entry ${formatAddress(resetEntry)} outside Boot ROM boundary [${formatAddress(baseAddress)}, ${formatAddress(baseAddress + size)}]`

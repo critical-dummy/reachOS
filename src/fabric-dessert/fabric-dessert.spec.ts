@@ -1,13 +1,18 @@
 import {describe, it, expect} from 'vitest';
 import {
+  assertValidAddress64,
+  BootRom,
   createFabricDessertInstance,
   DeviceClass,
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
+  isValidAddress64,
   MemoryRegionType,
+  PhysicalAddressSpace,
   RuntimeLifecycleState,
   SparsePhysicalMemoryRegion,
+  toAddress64,
 } from './index';
 
 describe('Fabric Dessert Core Foundation', () => {
@@ -490,38 +495,45 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(instance.memory.read32(endOffset)).toBe(0);
     });
 
-    it('13. guarantees 64-bit safe sparse memory storage above Number.MAX_SAFE_INTEGER page indices', () => {
-      // Create a sparse physical memory region placed above 2^53 so page index exceeds Number.MAX_SAFE_INTEGER
-      // Number.MAX_SAFE_INTEGER is (2^53 - 1) = 9007199254740991n
-      // Page size is 65536 bytes (2^16)
-      // A page index of 9007199254740992n (2^53) corresponds to offset 2^69, but within a 64-bit space:
-      // Let's choose page index: 0x0020_0000_0000_0000n = 9007199254740992n > Number.MAX_SAFE_INTEGER
-      // Notice: in 64-bit address space, address = 0x2000_0000_0000_0000n.
-      // Page index = 0x2000_0000_0000_0000n / 65536n = 0x2000_0000_0000n (562949953421312n)
-      // To have page index itself > Number.MAX_SAFE_INTEGER:
-      // pageIndex = BigInt(Number.MAX_SAFE_INTEGER) + 100n
-      const highPageIndex = BigInt(Number.MAX_SAFE_INTEGER) + 100n;
-      const highOffset = highPageIndex * 65536n; // 590295810358876127232n
-      const regionSize = highOffset + 131072n;
+    it('13. guarantees 64-bit safe sparse memory storage at high addresses above Number.MAX_SAFE_INTEGER within 64-bit address space', () => {
+      // Number.MAX_SAFE_INTEGER is (2^53 - 1) = 9007199254740991n.
+      // In the 64-bit physical address space [0, 0xFFFF_FFFF_FFFF_FFFFn], choose a valid
+      // high address well above Number.MAX_SAFE_INTEGER near the upper end of the 64-bit space:
+      const highAddress = 0xffff_ffff_0000_0000n;
+      expect(highAddress > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true);
+      expect(highAddress <= 0xffff_ffff_ffff_ffffn).toBe(true);
 
-      const highSparseRegion = new SparsePhysicalMemoryRegion(
+      const regionSize = 131072n; // 128 KiB (2 x 64 KiB pages)
+      const highRegion = new SparsePhysicalMemoryRegion(
         'high_mem',
         'High Physical Memory',
-        0n,
+        highAddress,
         regionSize,
         MemoryRegionType.RAM,
         {read: true, write: true, execute: true}
       );
 
-      // Write distinct values at adjacent 64-bit safe offsets across high pages
-      highSparseRegion.write32(highOffset, 0xdeadbeef);
-      highSparseRegion.write32(highOffset + 65536n, 0xcafebabe);
+      // Write distinct values at adjacent 64-bit safe offsets across pages
+      highRegion.write32(0n, 0xdeadbeef);
+      highRegion.write32(65536n, 0xcafebabe);
 
-      expect(highSparseRegion.read32(highOffset)).toBe(0xdeadbeef);
-      expect(highSparseRegion.read32(highOffset + 65536n)).toBe(0xcafebabe);
+      expect(highRegion.read32(0n)).toBe(0xdeadbeef);
+      expect(highRegion.read32(65536n)).toBe(0xcafebabe);
 
-      // Verify unallocated high page reads zero
-      expect(highSparseRegion.read32(highOffset + 4n)).toBe(0);
+      // Verify unallocated offset reads zero
+      expect(highRegion.read32(4n)).toBe(0);
+
+      // Also map into PhysicalAddressSpace and verify full 64-bit address resolution
+      const mem = new PhysicalAddressSpace();
+      mem.mapRegion(highRegion);
+
+      expect(mem.read32(highAddress)).toBe(0xdeadbeef);
+      expect(mem.read32(highAddress + 65536n)).toBe(0xcafebabe);
+      expect(mem.read32(highAddress + 4n)).toBe(0);
+
+      // Write through address space at high 64-bit address
+      mem.write32(highAddress + 8n, 0x11223344);
+      expect(mem.read32(highAddress + 8n)).toBe(0x11223344);
     });
 
     it('14. preserves PARKED secondary CPUs across runtime pause and resume', () => {
@@ -617,6 +629,113 @@ describe('Fabric Dessert Core Foundation', () => {
       // Core 2 and 3 remain PARKED
       expect(instance.cpu.getCore(2)?.getStatus().runState).toBe('PARKED');
       expect(instance.cpu.getCore(3)?.getStatus().runState).toBe('PARKED');
+    });
+
+    it('17. enforces Address64 range [0, 0xFFFF_FFFF_FFFF_FFFFn] and validates toAddress64 helper', () => {
+      // Valid Address64 values
+      expect(toAddress64(0)).toBe(0n);
+      expect(toAddress64(0n)).toBe(0n);
+      expect(toAddress64('0')).toBe(0n);
+      expect(toAddress64(0xffff_ffff_ffff_ffffn)).toBe(0xffff_ffff_ffff_ffffn);
+      expect(toAddress64('0xffffffffffffffff')).toBe(0xffff_ffff_ffff_ffffn);
+
+      expect(isValidAddress64(0n)).toBe(true);
+      expect(isValidAddress64(0xffff_ffff_ffff_ffffn)).toBe(true);
+      expect(isValidAddress64(0x8000_0000_0000_0000n)).toBe(true);
+
+      // Invalid negative addresses rejected
+      expect(() => toAddress64(-1)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => toAddress64(-1n)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => toAddress64('-1')).toThrow(/out of 64-bit physical address range/i);
+      expect(isValidAddress64(-1n)).toBe(false);
+      expect(() => assertValidAddress64(-1n)).toThrow(/out of 64-bit physical address range/i);
+
+      // Invalid addresses exceeding 2^64 - 1 rejected
+      expect(() => toAddress64(0x1_0000_0000_0000_0000n)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => toAddress64('0x10000000000000000')).toThrow(/out of 64-bit physical address range/i);
+      expect(isValidAddress64(0x1_0000_0000_0000_0000n)).toBe(false);
+      expect(() => assertValidAddress64(0x1_0000_0000_0000_0000n)).toThrow(/out of 64-bit physical address range/i);
+    });
+
+    it('18. rejects memory region and MMIO creation/mapping when boundary extends beyond 0xFFFF_FFFF_FFFF_FFFFn', () => {
+      const mem = new PhysicalAddressSpace();
+
+      // Negative base address rejected
+      expect(() => {
+        new SparsePhysicalMemoryRegion(
+          'neg_base',
+          'Negative Base',
+          -1n,
+          4096n,
+          MemoryRegionType.RAM,
+          {read: true, write: true, execute: true}
+        );
+      }).toThrow(/out of 64-bit physical address range/i);
+
+      // Base address exceeding 64-bit range rejected
+      expect(() => {
+        new SparsePhysicalMemoryRegion(
+          'overflow_base',
+          'Overflow Base',
+          0x1_0000_0000_0000_0000n,
+          4096n,
+          MemoryRegionType.RAM,
+          {read: true, write: true, execute: true}
+        );
+      }).toThrow(/out of 64-bit physical address range/i);
+
+      // Region extending beyond 0xFFFF_FFFF_FFFF_FFFFn rejected
+      expect(() => {
+        new SparsePhysicalMemoryRegion(
+          'overflow_end',
+          'Overflow End',
+          0xffff_ffff_ffff_0000n,
+          0x20000n, // extends beyond 0xFFFF_FFFF_FFFF_FFFFn
+          MemoryRegionType.RAM,
+          {read: true, write: true, execute: true}
+        );
+      }).toThrow(/exceeds 64-bit physical address space limit/i);
+
+      // Boot ROM extending beyond 0xFFFF_FFFF_FFFF_FFFFn rejected
+      expect(() => {
+        new BootRom(0xffff_ffff_ffff_0000n, 0x20000n);
+      }).toThrow(/exceeds 64-bit physical address space limit/i);
+
+      // MMIO mapping extending beyond 0xFFFF_FFFF_FFFF_FFFFn rejected
+      expect(() => {
+        mem.mapMMIO({
+          id: 'bad_mmio',
+          name: 'Bad MMIO',
+          baseAddress: 0xffff_ffff_ffff_0000n,
+          size: 0x20000n,
+          handler: {
+            read: () => 0n,
+            write: (_offset, _val) => {
+              void _offset;
+              void _val;
+            },
+          },
+        });
+      }).toThrow(/exceeds 64-bit physical address space limit/i);
+    });
+
+    it('19. rejects physical access and instruction fetches outside 64-bit address space or extending beyond limit', () => {
+      const mem = new PhysicalAddressSpace();
+
+      // Negative address rejected
+      expect(() => mem.read8(-1n)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.write8(-1n, 0)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.fetchInstructionBytes(-1n, 4)).toThrow(/out of 64-bit physical address range/i);
+
+      // Address exceeding 64-bit limit rejected
+      expect(() => mem.read8(0x1_0000_0000_0000_0000n)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.write8(0x1_0000_0000_0000_0000n, 0)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.fetchInstructionBytes(0x1_0000_0000_0000_0000n, 4)).toThrow(/out of 64-bit physical address range/i);
+
+      // Access at near-top address where byte count extends beyond 0xFFFF_FFFF_FFFF_FFFFn
+      expect(() => mem.read32(0xffff_ffff_ffff_fffdn)).toThrow(/exceeds 64-bit physical address space limit/i);
+      expect(() => mem.write32(0xffff_ffff_ffff_fffdn, 0)).toThrow(/exceeds 64-bit physical address space limit/i);
+      expect(() => mem.fetchInstructionBytes(0xffff_ffff_ffff_fffdn, 4)).toThrow(/exceeds 64-bit physical address space limit/i);
     });
   });
 });
