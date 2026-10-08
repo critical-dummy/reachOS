@@ -29,9 +29,10 @@ export interface IFrt64CoreBoundary {
   setProgramCounter(address: Address64): void;
   reset(vector?: Address64): void;
   halt(): void;
+  pause(): void;
   resume(): void;
   park(): void;
-  unpark(): void;
+  unpark(entryVector?: Address64): boolean;
   signalInterrupt(irqVector: number): void;
   fetchInstructionBytes(sizeBytes: number): InstructionFetchResult;
   step(): ExecutionStepResult;
@@ -49,8 +50,11 @@ export interface IFrt64CpuBoundary {
   setResetVectorAll(vector: Address64): void;
   resetAll(vector?: Address64): void;
   haltAll(): void;
+  pauseRunningCores(): void;
+  resumePausedCores(): void;
   resumePrimary(): void;
   resumeAll(): void;
+  releaseSecondaryCore(coreId: number, entryVector?: Address64): boolean;
   signalGlobalInterrupt(irqVector: number): void;
 }
 
@@ -134,6 +138,12 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     this.runState = Frt64CoreRunState.HALTED;
   }
 
+  pause(): void {
+    if (this.runState === Frt64CoreRunState.RUNNING) {
+      this.runState = Frt64CoreRunState.PAUSED;
+    }
+  }
+
   resume(): void {
     if (
       this.runState === Frt64CoreRunState.HALTED ||
@@ -148,10 +158,16 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     this.runState = Frt64CoreRunState.PARKED;
   }
 
-  unpark(): void {
-    if (this.runState === Frt64CoreRunState.PARKED) {
-      this.runState = Frt64CoreRunState.RESET;
+  unpark(entryVector?: Address64): boolean {
+    if (this.runState !== Frt64CoreRunState.PARKED) {
+      return false;
     }
+    if (entryVector !== undefined) {
+      this.currentResetVector = entryVector;
+      this.currentPc = entryVector;
+    }
+    this.runState = Frt64CoreRunState.RESET;
+    return true;
   }
 
   signalInterrupt(_irqVector: number): void {
@@ -228,7 +244,13 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
     if (config.coreCount <= 0) {
       throw new Error(`FRT64 coreCount must be at least 1, received: ${config.coreCount}`);
     }
-    this.primaryCoreId = config.primaryCoreId ?? 0;
+    const primaryId = config.primaryCoreId ?? 0;
+    if (primaryId < 0 || primaryId >= config.coreCount) {
+      throw new Error(
+        `Invalid primaryCoreId ${primaryId}: must be between 0 and ${config.coreCount - 1} for topology with ${config.coreCount} cores`
+      );
+    }
+    this.primaryCoreId = primaryId;
     this.defaultFamily = config.defaultFamily;
 
     const clusters = Math.max(1, config.clusters ?? 1);
@@ -296,6 +318,20 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
     }
   }
 
+  pauseRunningCores(): void {
+    for (const core of this.cores) {
+      core.pause();
+    }
+  }
+
+  resumePausedCores(): void {
+    for (const core of this.cores) {
+      if (core.getStatus().runState === Frt64CoreRunState.PAUSED) {
+        core.resume();
+      }
+    }
+  }
+
   resumePrimary(): void {
     this.getPrimaryCore().resume();
   }
@@ -304,6 +340,17 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
     for (const core of this.cores) {
       core.resume();
     }
+  }
+
+  releaseSecondaryCore(coreId: number, entryVector?: Address64): boolean {
+    if (coreId === this.primaryCoreId) {
+      return false; // Primary core cannot be released as a secondary
+    }
+    const core = this.cores[coreId];
+    if (!core) {
+      return false;
+    }
+    return core.unpark(entryVector);
   }
 
   signalGlobalInterrupt(irqVector: number): void {

@@ -99,7 +99,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
     if (this.state !== RuntimeLifecycleState.RUNNING) {
       throw new Error(`Cannot pause Fabric Dessert when in state "${this.state}".`);
     }
-    this.board.cpuBoundary.haltAll();
+    this.board.pause();
     this.transitionTo(RuntimeLifecycleState.PAUSED);
   }
 
@@ -107,7 +107,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
     if (this.state !== RuntimeLifecycleState.PAUSED) {
       throw new Error(`Cannot resume Fabric Dessert when in state "${this.state}".`);
     }
-    this.board.cpuBoundary.resumePrimary();
+    this.board.resume();
     this.transitionTo(RuntimeLifecycleState.RUNNING);
   }
 

@@ -489,5 +489,134 @@ describe('Fabric Dessert Core Foundation', () => {
       const endOffset = rom128MB - 4n;
       expect(instance.memory.read32(endOffset)).toBe(0);
     });
+
+    it('13. guarantees 64-bit safe sparse memory storage above Number.MAX_SAFE_INTEGER page indices', () => {
+      // Create a sparse physical memory region placed above 2^53 so page index exceeds Number.MAX_SAFE_INTEGER
+      // Number.MAX_SAFE_INTEGER is (2^53 - 1) = 9007199254740991n
+      // Page size is 65536 bytes (2^16)
+      // A page index of 9007199254740992n (2^53) corresponds to offset 2^69, but within a 64-bit space:
+      // Let's choose page index: 0x0020_0000_0000_0000n = 9007199254740992n > Number.MAX_SAFE_INTEGER
+      // Notice: in 64-bit address space, address = 0x2000_0000_0000_0000n.
+      // Page index = 0x2000_0000_0000_0000n / 65536n = 0x2000_0000_0000n (562949953421312n)
+      // To have page index itself > Number.MAX_SAFE_INTEGER:
+      // pageIndex = BigInt(Number.MAX_SAFE_INTEGER) + 100n
+      const highPageIndex = BigInt(Number.MAX_SAFE_INTEGER) + 100n;
+      const highOffset = highPageIndex * 65536n; // 590295810358876127232n
+      const regionSize = highOffset + 131072n;
+
+      const highSparseRegion = new SparsePhysicalMemoryRegion(
+        'high_mem',
+        'High Physical Memory',
+        0n,
+        regionSize,
+        MemoryRegionType.RAM,
+        {read: true, write: true, execute: true}
+      );
+
+      // Write distinct values at adjacent 64-bit safe offsets across high pages
+      highSparseRegion.write32(highOffset, 0xdeadbeef);
+      highSparseRegion.write32(highOffset + 65536n, 0xcafebabe);
+
+      expect(highSparseRegion.read32(highOffset)).toBe(0xdeadbeef);
+      expect(highSparseRegion.read32(highOffset + 65536n)).toBe(0xcafebabe);
+
+      // Verify unallocated high page reads zero
+      expect(highSparseRegion.read32(highOffset + 4n)).toBe(0);
+    });
+
+    it('14. preserves PARKED secondary CPUs across runtime pause and resume', () => {
+      const instance = createFabricDessertInstance({
+        cpuTopology: {
+          coreCount: 4,
+          primaryCoreId: 0,
+          defaultFamily: Frt64ExecutionFamily.ARM_64,
+        },
+      });
+
+      instance.initialize();
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe('RESET');
+      for (const sec of instance.cpu.getSecondaryCores()) {
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+
+      // Start: Primary enters RUNNING, Secondaries remain PARKED
+      instance.start();
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe('RUNNING');
+      for (const sec of instance.cpu.getSecondaryCores()) {
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+
+      // Pause: Primary enters PAUSED (NOT HALTED), Secondaries remain PARKED (NOT HALTED)
+      instance.pause();
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe('PAUSED');
+      for (const sec of instance.cpu.getSecondaryCores()) {
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+
+      // Resume: Primary returns to RUNNING, Secondaries remain PARKED
+      instance.resume();
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe('RUNNING');
+      for (const sec of instance.cpu.getSecondaryCores()) {
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+    });
+
+    it('15. validates primary CPU topology during construction and rejects invalid primaryCoreId', () => {
+      // primaryCoreId < 0 must throw
+      expect(() => {
+        createFabricDessertInstance({
+          cpuTopology: {
+            coreCount: 4,
+            primaryCoreId: -1,
+            defaultFamily: Frt64ExecutionFamily.ARM_64,
+          },
+        });
+      }).toThrow(/Invalid primaryCoreId/i);
+
+      // primaryCoreId >= coreCount must throw
+      expect(() => {
+        createFabricDessertInstance({
+          cpuTopology: {
+            coreCount: 4,
+            primaryCoreId: 4,
+            defaultFamily: Frt64ExecutionFamily.ARM_64,
+          },
+        });
+      }).toThrow(/Invalid primaryCoreId/i);
+    });
+
+    it('16. provides controlled secondary CPU release boundary without fake bring-up execution', () => {
+      const instance = createFabricDessertInstance({
+        cpuTopology: {
+          coreCount: 4,
+          primaryCoreId: 0,
+          defaultFamily: Frt64ExecutionFamily.ARM_64,
+        },
+      });
+
+      instance.board.reset();
+
+      // Primary core cannot be released as a secondary
+      expect(instance.cpu.releaseSecondaryCore(0)).toBe(false);
+
+      // Non-existent core cannot be released
+      expect(instance.cpu.releaseSecondaryCore(99)).toBe(false);
+
+      // Release secondary core 1: transitions from PARKED to RESET
+      const secondaryCore1 = instance.cpu.getCore(1);
+      expect(secondaryCore1?.getStatus().runState).toBe('PARKED');
+
+      const released = instance.cpu.releaseSecondaryCore(1, 0x00000200n);
+      expect(released).toBe(true);
+      expect(secondaryCore1?.getStatus().runState).toBe('RESET');
+      expect(secondaryCore1?.pc).toBe(0x00000200n);
+
+      // Attempting to release an already-released core returns false
+      expect(instance.cpu.releaseSecondaryCore(1)).toBe(false);
+
+      // Core 2 and 3 remain PARKED
+      expect(instance.cpu.getCore(2)?.getStatus().runState).toBe('PARKED');
+      expect(instance.cpu.getCore(3)?.getStatus().runState).toBe('PARKED');
+    });
   });
 });

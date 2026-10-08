@@ -19,6 +19,8 @@ export interface IFabricDessertBoard {
   readonly bootContract: FabricDessertBootContract;
 
   start(): void;
+  pause(): void;
+  resume(): void;
   reset(): void;
   powerOff(): void;
 }
@@ -119,6 +121,16 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     // Only the primary boot CPU enters the running boot path.
     // Secondary CPUs remain parked/held in reset.
     this.cpuBoundary.resumePrimary();
+  }
+
+  pause(): void {
+    // Preserves PARKED secondary CPUs by only pausing running cores
+    this.cpuBoundary.pauseRunningCores();
+  }
+
+  resume(): void {
+    // Preserves PARKED secondary CPUs by only resuming paused cores
+    this.cpuBoundary.resumePausedCores();
   }
 
   reset(): void {

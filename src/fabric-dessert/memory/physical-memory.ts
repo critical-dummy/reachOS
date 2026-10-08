@@ -26,8 +26,8 @@ export class SparsePhysicalMemoryRegion implements IPhysicalMemoryRegion {
   readonly type: MemoryRegionType;
   readonly permissions: MemoryPermissions;
 
-  // Sparse storage: maps page index to 64KB Uint8Array
-  private readonly pages = new Map<number, Uint8Array>();
+  // Sparse storage: maps 64-bit page index to 64KB Uint8Array
+  private readonly pages = new Map<bigint, Uint8Array>();
 
   constructor(
     id: string,
@@ -65,7 +65,7 @@ export class SparsePhysicalMemoryRegion implements IPhysicalMemoryRegion {
     }
   }
 
-  private getOrCreatePage(pageIndex: number): Uint8Array {
+  private getOrCreatePage(pageIndex: bigint): Uint8Array {
     let page = this.pages.get(pageIndex);
     if (!page) {
       page = new Uint8Array(PAGE_SIZE_BYTES);
@@ -77,7 +77,7 @@ export class SparsePhysicalMemoryRegion implements IPhysicalMemoryRegion {
   read8(offset: Size64): number {
     this.checkBounds(offset, 1);
     this.checkPermission('read');
-    const pageIdx = Number(offset / PAGE_SIZE_BIG);
+    const pageIdx = offset / PAGE_SIZE_BIG;
     const pageOffset = Number(offset % PAGE_SIZE_BIG);
     const page = this.pages.get(pageIdx);
     return page ? page[pageOffset] : 0;
@@ -112,7 +112,7 @@ export class SparsePhysicalMemoryRegion implements IPhysicalMemoryRegion {
   write8(offset: Size64, value: number): void {
     this.checkBounds(offset, 1);
     this.checkPermission('write');
-    const pageIdx = Number(offset / PAGE_SIZE_BIG);
+    const pageIdx = offset / PAGE_SIZE_BIG;
     const pageOffset = Number(offset % PAGE_SIZE_BIG);
     const page = this.getOrCreatePage(pageIdx);
     page[pageOffset] = value & 0xff;

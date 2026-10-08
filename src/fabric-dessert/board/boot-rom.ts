@@ -28,8 +28,8 @@ export class BootRom implements IBootRom {
   };
   readonly resetEntry: Address64;
 
-  // Sparse 64 KiB page storage ensuring no silent size caps
-  private readonly pages = new Map<number, Uint8Array>();
+  // Sparse 64 KiB page storage ensuring no silent size caps with true 64-bit page addressing
+  private readonly pages = new Map<bigint, Uint8Array>();
 
   constructor(
     baseAddress: Address64,
@@ -69,7 +69,7 @@ export class BootRom implements IBootRom {
 
     for (let i = 0; i < payload.length; i++) {
       const offsetBig = BigInt(i);
-      const pageIdx = Number(offsetBig / PAGE_SIZE_BIG);
+      const pageIdx = offsetBig / PAGE_SIZE_BIG;
       const pageOffset = Number(offsetBig % PAGE_SIZE_BIG);
 
       let page = this.pages.get(pageIdx);
@@ -91,7 +91,7 @@ export class BootRom implements IBootRom {
 
   read8(offset: Size64): number {
     this.checkBounds(offset, 1);
-    const pageIdx = Number(offset / PAGE_SIZE_BIG);
+    const pageIdx = offset / PAGE_SIZE_BIG;
     const pageOffset = Number(offset % PAGE_SIZE_BIG);
     const page = this.pages.get(pageIdx);
     return page ? page[pageOffset] : 0;
