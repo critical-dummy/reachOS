@@ -5,7 +5,9 @@ import {
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
+  MemoryRegionType,
   RuntimeLifecycleState,
+  SparsePhysicalMemoryRegion,
 } from './index';
 
 describe('Fabric Dessert Core Foundation', () => {
@@ -54,22 +56,25 @@ describe('Fabric Dessert Core Foundation', () => {
     expect(instance.getState()).toBe(RuntimeLifecycleState.STOPPED);
   });
 
-  it('provides FRT64 execution family boundary contracts without fake ISA simulation', () => {
+  it('exposes FRT64 execution family metadata and rejects fake mode transitions without execution engine', () => {
     const instance = createFabricDessertInstance();
     const core0 = instance.cpu.getCore(0);
     expect(core0).toBeDefined();
 
     expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.ARM_64);
 
-    // Switch across supported execution families
-    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.ARM_32)).toBe(true);
-    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.ARM_32);
+    // No-op switch to the already-active family returns true
+    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.ARM_64)).toBe(true);
 
-    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.X86_64)).toBe(true);
-    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.X86_64);
+    // Attempting architectural transitions without an attached execution engine is rejected
+    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.ARM_32)).toBe(false);
+    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.ARM_64);
 
-    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.X86_32)).toBe(true);
-    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.X86_32);
+    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.X86_64)).toBe(false);
+    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.ARM_64);
+
+    expect(core0?.switchExecutionFamily(Frt64ExecutionFamily.X86_32)).toBe(false);
+    expect(core0?.getActiveFamily()).toBe(Frt64ExecutionFamily.ARM_64);
   });
 
   it('dispatches memory reads and writes through configurable 64-bit address space', () => {
@@ -264,7 +269,7 @@ describe('Fabric Dessert Core Foundation', () => {
   });
 
   describe('Fabric Dessert Minimum Boot Substrate', () => {
-    it('maps Boot ROM into physical address space with configured bounds', () => {
+    it('1. maps Boot ROM into physical address space with configured bounds', () => {
       const instance = createFabricDessertInstance();
       const bootRom = instance.board.bootRom;
       const mem = instance.memory;
@@ -273,18 +278,14 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(bootRom.baseAddress).toBe(instance.board.bootContract.bootRomBase);
       expect(bootRom.size).toBe(instance.board.bootContract.bootRomSizeBytes);
 
-      // Verify physical address space resolves Boot ROM
       const regionAtBase = mem.getRegionAt(bootRom.baseAddress);
       expect(regionAtBase?.id).toBe('bootrom');
     });
 
-    it('enforces read-only permissions on Boot ROM', () => {
+    it('2. guarantees Boot ROM is immutable at runtime (writes rejected, no runtime payload mutation API)', () => {
       const instance = createFabricDessertInstance();
       const mem = instance.memory;
       const bootBase = instance.board.bootContract.bootRomBase;
-
-      // Reading succeeds without error
-      expect(mem.read32(bootBase)).toBe(0);
 
       // Writing to Boot ROM throws permission error
       expect(() => {
@@ -294,52 +295,14 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(() => {
         mem.write8(bootBase, 0xff);
       }).toThrow(/read-only/i);
+
+      // Verify no runtime loadPayload method is exposed on IBootRom
+      const romObj = instance.board.bootRom as unknown as Record<string, unknown>;
+      expect(romObj['loadPayload']).toBeUndefined();
     });
 
-    it('places FRT64 execution state at the configured boot entry on board reset', () => {
-      const customResetVector = 0x00000100n;
-      const instance = createFabricDessertInstance({
-        bootContract: {
-          bootRomBase: 0x00000000n,
-          bootRomSizeBytes: 0x00100000n,
-          resetVector: customResetVector,
-        },
-      });
-
-      instance.board.reset();
-
-      const core0 = instance.cpu.getCore(0);
-      expect(core0).toBeDefined();
-      expect(core0?.pc).toBe(customResetVector);
-      expect(core0?.resetVector).toBe(customResetVector);
-
-      const status = core0?.getStatus();
-      expect(status?.pc).toBe(customResetVector);
-      expect(status?.runState).toBe('RESET');
-    });
-
-    it('ensures configured reset vector corresponds to Boot ROM range', () => {
-      const bootRomBase = 0x00000000n;
-      const bootRomSize = 0x00100000n;
-      const instance = createFabricDessertInstance({
-        bootContract: {
-          bootRomBase,
-          bootRomSizeBytes: bootRomSize,
-          resetVector: 0x00000040n,
-        },
-      });
-
-      const entry = instance.board.bootContract.resetVector;
-      expect(entry >= bootRomBase).toBe(true);
-      expect(entry < bootRomBase + bootRomSize).toBe(true);
-
-      const regionAtEntry = instance.memory.getRegionAt(entry);
-      expect(regionAtEntry?.id).toBe('bootrom');
-    });
-
-    it('reaches Boot ROM through the physical memory interface on instruction fetch', () => {
-      // Prepare a test boot payload (e.g. 4 distinct bytes at reset entry)
-      const testPayload = new Uint8Array([0x78, 0x56, 0x34, 0x12]);
+    it('3. verifies Boot ROM reads work correctly', () => {
+      const testPayload = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
       const instance = createFabricDessertInstance({
         bootContract: {
           bootRomBase: 0x00000000n,
@@ -349,32 +312,182 @@ describe('Fabric Dessert Core Foundation', () => {
         },
       });
 
-      instance.board.reset();
-      const core0 = instance.cpu.getCore(0);
-      expect(core0).toBeDefined();
+      const mem = instance.memory;
+      expect(mem.read8(0x00000000n)).toBe(0xaa);
+      expect(mem.read8(0x00000001n)).toBe(0xbb);
+      expect(mem.read32(0x00000000n)).toBe(0xddccbbaa);
 
-      // Fetch first instruction through the CPU fetch boundary
-      const fetchResult = core0?.fetchInstruction(4);
-      expect(fetchResult?.success).toBe(true);
-      expect(fetchResult?.address).toBe(0x00000000n);
-      expect(fetchResult?.bytes).toBeDefined();
-      expect(fetchResult?.bytes?.[0]).toBe(0x78);
-      expect(fetchResult?.bytes?.[1]).toBe(0x56);
-      expect(fetchResult?.bytes?.[2]).toBe(0x34);
-      expect(fetchResult?.bytes?.[3]).toBe(0x12);
+      const bytes = mem.readBytes(0x00000000n, 4);
+      expect(bytes).toEqual(testPayload);
     });
 
-    it('does NOT execute fake instructions when step is called without an execution engine', () => {
+    it('4. verifies physical instruction fetch requires execute permission and succeeds on executable Boot ROM', () => {
+      const testPayload = new Uint8Array([0x10, 0x20, 0x30, 0x40]);
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: testPayload,
+        },
+      });
+
+      const fetched = instance.memory.fetchInstructionBytes(0x00000000n, 4);
+      expect(fetched).toEqual(testPayload);
+    });
+
+    it('5. faults when attempting to fetch instructions from non-executable memory or MMIO', () => {
+      const instance = createFabricDessertInstance();
+      const mem = instance.memory;
+
+      // Map a non-executable test region
+      const nonExecRegion = new SparsePhysicalMemoryRegion(
+        'no_exec_data',
+        'Non-Executable Data Buffer',
+        0x300000000n,
+        4096n,
+        MemoryRegionType.RAM,
+        {read: true, write: true, execute: false}
+      );
+      mem.mapRegion(nonExecRegion);
+
+      // Fetching from non-executable region must fault
+      expect(() => {
+        mem.fetchInstructionBytes(0x300000000n, 4);
+      }).toThrow(/execute permission/i);
+
+      // Fetching from MMIO range must also fault
+      const mmioBase = instance.board.config.memoryLayout.mmioBase;
+      expect(() => {
+        mem.fetchInstructionBytes(mmioBase, 4);
+      }).toThrow(/not executable/i);
+
+      // Fetching from unmapped address must fault
+      expect(() => {
+        mem.fetchInstructionBytes(0x999900000000n, 4);
+      }).toThrow(/unmapped/i);
+    });
+
+    it('6. reset places only the configured primary boot CPU at the board reset entry', () => {
+      const customResetVector = 0x00000100n;
+      const instance = createFabricDessertInstance({
+        cpuTopology: {
+          coreCount: 4,
+          primaryCoreId: 0,
+          defaultFamily: Frt64ExecutionFamily.ARM_64,
+        },
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: customResetVector,
+        },
+      });
+
+      instance.board.reset();
+
+      const primary = instance.cpu.getPrimaryCore();
+      expect(primary.coreId).toBe(0);
+      expect(primary.isPrimary).toBe(true);
+      expect(primary.pc).toBe(customResetVector);
+      expect(primary.resetVector).toBe(customResetVector);
+      expect(primary.getStatus().runState).toBe('RESET');
+    });
+
+    it('7. secondary CPUs remain held/parked on reset until a future CPU bring-up mechanism exists', () => {
+      const instance = createFabricDessertInstance({
+        cpuTopology: {
+          coreCount: 4,
+          primaryCoreId: 0,
+          defaultFamily: Frt64ExecutionFamily.ARM_64,
+        },
+      });
+
+      instance.board.reset();
+
+      const secondaries = instance.cpu.getSecondaryCores();
+      expect(secondaries.length).toBe(3);
+
+      for (const sec of secondaries) {
+        expect(sec.isPrimary).toBe(false);
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+
+      // Starting the instance resumes only the primary boot CPU
+      instance.initialize();
+      instance.start();
+
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe('RUNNING');
+      for (const sec of secondaries) {
+        expect(sec.getStatus().runState).toBe('PARKED');
+      }
+    });
+
+    it('8. verifies byte-fetch boundary for an explicitly requested number of raw bytes', () => {
+      const testBytes = new Uint8Array([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: testBytes,
+        },
+      });
+
+      instance.board.reset();
+      const primary = instance.cpu.getPrimaryCore();
+
+      // Explicitly fetch 2 bytes
+      const fetch2 = primary.fetchInstructionBytes(2);
+      expect(fetch2.success).toBe(true);
+      expect(fetch2.sizeBytes).toBe(2);
+      expect(fetch2.bytes).toEqual(new Uint8Array([0x12, 0x34]));
+
+      // Explicitly fetch 6 bytes
+      const fetch6 = primary.fetchInstructionBytes(6);
+      expect(fetch6.success).toBe(true);
+      expect(fetch6.sizeBytes).toBe(6);
+      expect(fetch6.bytes).toEqual(testBytes);
+    });
+
+    it('9. step() does NOT decode or execute instructions without an execution engine', () => {
       const instance = createFabricDessertInstance();
       instance.board.reset();
 
-      const core0 = instance.cpu.getCore(0);
-      expect(core0).toBeDefined();
+      const primary = instance.cpu.getPrimaryCore();
+      const stepResult = primary.step();
 
-      const stepResult = core0?.step();
-      expect(stepResult?.executed).toBe(false);
-      expect(stepResult?.reason).toBe('NO_EXECUTION_ENGINE_ATTACHED');
-      expect(stepResult?.fetched?.success).toBe(true);
+      expect(stepResult.executed).toBe(false);
+      expect(stepResult.reason).toBe('NO_EXECUTION_ENGINE_ATTACHED');
+    });
+
+    it('12. ensures large configured Boot ROM sizes are not silently truncated', () => {
+      // Configure a 128 MiB Boot ROM (larger than previous 64 MiB cap)
+      const rom128MB = 128n * 1024n * 1024n; // 0x0800_0000n
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: rom128MB,
+          resetVector: 0x00000000n,
+        },
+        memoryLayout: {
+          ramBase: rom128MB,
+          ramSizeBytes: 0x40000000n, // 1 GiB RAM
+          mmioBase: 0x80000000n,
+          mmioSizeBytes: 0x80000000n,
+        },
+      });
+
+      const bootRom = instance.board.bootRom;
+      expect(bootRom.size).toBe(rom128MB);
+
+      // Sparse backing handles offsets beyond 64 MiB without truncation
+      const offsetAt100MB = 100n * 1024n * 1024n;
+      expect(bootRom.read8(offsetAt100MB)).toBe(0);
+
+      // Verify physical address space resolves the entire 128 MiB range
+      const endOffset = rom128MB - 4n;
+      expect(instance.memory.read32(endOffset)).toBe(0);
     });
   });
 });

@@ -12,11 +12,13 @@ import {Address64} from '../../types';
 export interface IFrt64BusMaster {
   readPhysical(address: Address64, sizeBytes: number): Uint8Array;
   writePhysical(address: Address64, data: Uint8Array): void;
+  fetchInstructionPhysical(address: Address64, sizeBytes: number): Uint8Array;
 }
 
 export interface IFrt64CoreBoundary {
   readonly coreId: number;
   readonly clusterId: number;
+  readonly isPrimary: boolean;
   readonly pc: Address64;
   readonly resetVector: Address64;
   getStatus(): Frt64CoreStatus;
@@ -28,20 +30,26 @@ export interface IFrt64CoreBoundary {
   reset(vector?: Address64): void;
   halt(): void;
   resume(): void;
+  park(): void;
+  unpark(): void;
   signalInterrupt(irqVector: number): void;
-  fetchInstruction(sizeBytes?: number): InstructionFetchResult;
+  fetchInstructionBytes(sizeBytes: number): InstructionFetchResult;
   step(): ExecutionStepResult;
 }
 
 export interface IFrt64CpuBoundary {
   readonly coreCount: number;
+  readonly primaryCoreId: number;
   readonly defaultFamily: Frt64ExecutionFamily;
   getCore(coreId: number): IFrt64CoreBoundary | undefined;
+  getPrimaryCore(): IFrt64CoreBoundary;
+  getSecondaryCores(): readonly IFrt64CoreBoundary[];
   getAllCores(): readonly IFrt64CoreBoundary[];
   attachBusMaster(bus: IFrt64BusMaster): void;
   setResetVectorAll(vector: Address64): void;
   resetAll(vector?: Address64): void;
   haltAll(): void;
+  resumePrimary(): void;
   resumeAll(): void;
   signalGlobalInterrupt(irqVector: number): void;
 }
@@ -49,7 +57,8 @@ export interface IFrt64CpuBoundary {
 export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   readonly coreId: number;
   readonly clusterId: number;
-  private runState: Frt64CoreRunState = Frt64CoreRunState.RESET;
+  readonly isPrimary: boolean;
+  private runState: Frt64CoreRunState;
   private activeFamily: Frt64ExecutionFamily;
   private cyclesExecuted = 0n;
   private currentPc: Address64;
@@ -59,9 +68,11 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   constructor(config: Frt64CoreConfig) {
     this.coreId = config.coreId;
     this.clusterId = config.clusterId ?? 0;
+    this.isPrimary = config.isPrimary ?? (config.coreId === 0);
     this.activeFamily = config.initialFamily;
     this.currentResetVector = config.resetVector ?? 0n;
     this.currentPc = this.currentResetVector;
+    this.runState = this.isPrimary ? Frt64CoreRunState.RESET : Frt64CoreRunState.PARKED;
   }
 
   get pc(): Address64 {
@@ -83,6 +94,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   getStatus(): Frt64CoreStatus {
     return {
       coreId: this.coreId,
+      isPrimary: this.isPrimary,
       runState: this.runState,
       activeFamily: this.activeFamily,
       cyclesExecuted: this.cyclesExecuted,
@@ -99,9 +111,9 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     if (this.activeFamily === targetFamily) {
       return true;
     }
-    // Family switching is managed by the architectural boundary
-    this.activeFamily = targetFamily;
-    return true;
+    // Architectural boundary: FRT64 execution engine is external and not yet attached.
+    // We do NOT pretend that runtime execution-family switching is implemented.
+    return false;
   }
 
   attachBusMaster(bus: IFrt64BusMaster): void {
@@ -113,8 +125,9 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       this.currentResetVector = vector;
     }
     this.currentPc = this.currentResetVector;
-    this.runState = Frt64CoreRunState.RESET;
     this.cyclesExecuted = 0n;
+    // Primary core enters RESET state ready to boot; secondary cores remain PARKED
+    this.runState = this.isPrimary ? Frt64CoreRunState.RESET : Frt64CoreRunState.PARKED;
   }
 
   halt(): void {
@@ -122,8 +135,22 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   }
 
   resume(): void {
-    if (this.runState === Frt64CoreRunState.HALTED || this.runState === Frt64CoreRunState.RESET) {
+    if (
+      this.runState === Frt64CoreRunState.HALTED ||
+      this.runState === Frt64CoreRunState.RESET ||
+      this.runState === Frt64CoreRunState.PAUSED
+    ) {
       this.runState = Frt64CoreRunState.RUNNING;
+    }
+  }
+
+  park(): void {
+    this.runState = Frt64CoreRunState.PARKED;
+  }
+
+  unpark(): void {
+    if (this.runState === Frt64CoreRunState.PARKED) {
+      this.runState = Frt64CoreRunState.RESET;
     }
   }
 
@@ -131,7 +158,16 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     void _irqVector;
   }
 
-  fetchInstruction(sizeBytes = 4): InstructionFetchResult {
+  fetchInstructionBytes(sizeBytes: number): InstructionFetchResult {
+    if (sizeBytes <= 0) {
+      return {
+        success: false,
+        address: this.currentPc,
+        sizeBytes,
+        fault: `Invalid instruction fetch size: ${sizeBytes}`,
+      };
+    }
+
     if (!this.busMaster) {
       return {
         success: false,
@@ -142,7 +178,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     }
 
     try {
-      const bytes = this.busMaster.readPhysical(this.currentPc, sizeBytes);
+      const bytes = this.busMaster.fetchInstructionPhysical(this.currentPc, sizeBytes);
       return {
         success: true,
         address: this.currentPc,
@@ -162,6 +198,9 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   }
 
   step(): ExecutionStepResult {
+    if (this.runState === Frt64CoreRunState.PARKED) {
+      return {executed: false, state: this.runState, reason: 'PARKED'};
+    }
     if (this.runState === Frt64CoreRunState.HALTED) {
       return {executed: false, state: this.runState, reason: 'HALTED'};
     }
@@ -169,35 +208,27 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       return {executed: false, state: this.runState, reason: 'FAULT'};
     }
 
-    const fetched = this.fetchInstruction(4);
-    if (!fetched.success) {
-      return {
-        executed: false,
-        state: this.runState,
-        reason: 'FAULT',
-        fetched,
-      };
-    }
-
     // No fake ISA simulation or instruction interpreter.
     // Execution engine must be attached for actual architectural instruction execution.
+    // Does not assume any instruction byte length.
     return {
       executed: false,
       state: this.runState,
       reason: 'NO_EXECUTION_ENGINE_ATTACHED',
-      fetched,
     };
   }
 }
 
 export class Frt64CpuBoundary implements IFrt64CpuBoundary {
   private readonly cores: Frt64CoreBoundary[] = [];
+  readonly primaryCoreId: number;
   readonly defaultFamily: Frt64ExecutionFamily;
 
   constructor(config: Frt64TopologyConfig) {
     if (config.coreCount <= 0) {
       throw new Error(`FRT64 coreCount must be at least 1, received: ${config.coreCount}`);
     }
+    this.primaryCoreId = config.primaryCoreId ?? 0;
     this.defaultFamily = config.defaultFamily;
 
     const clusters = Math.max(1, config.clusters ?? 1);
@@ -209,6 +240,7 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
         new Frt64CoreBoundary({
           coreId: i,
           clusterId,
+          isPrimary: i === this.primaryCoreId,
           initialFamily: config.defaultFamily,
           resetVector: config.defaultResetVector,
         })
@@ -222,6 +254,18 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
 
   getCore(coreId: number): IFrt64CoreBoundary | undefined {
     return this.cores[coreId];
+  }
+
+  getPrimaryCore(): IFrt64CoreBoundary {
+    const primary = this.cores[this.primaryCoreId];
+    if (!primary) {
+      throw new Error(`Primary core ${this.primaryCoreId} not found in CPU topology`);
+    }
+    return primary;
+  }
+
+  getSecondaryCores(): readonly IFrt64CoreBoundary[] {
+    return this.cores.filter((c) => c.coreId !== this.primaryCoreId);
   }
 
   getAllCores(): readonly IFrt64CoreBoundary[] {
@@ -250,6 +294,10 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
     for (const core of this.cores) {
       core.halt();
     }
+  }
+
+  resumePrimary(): void {
+    this.getPrimaryCore().resume();
   }
 
   resumeAll(): void {

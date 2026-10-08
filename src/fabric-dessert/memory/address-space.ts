@@ -37,6 +37,13 @@ export interface IPhysicalAddressSpace {
 
   readBytes(address: Address64, count: number): Uint8Array;
   writeBytes(address: Address64, data: Uint8Array): void;
+
+  /**
+   * Pre-MMU physical instruction fetch operation.
+   * Resolves the physical region, verifies execute permission, and returns raw instruction bytes.
+   * Faults if the address is unmapped, within MMIO, or within a non-executable region.
+   */
+  fetchInstructionBytes(address: Address64, count: number): Uint8Array;
 }
 
 export class PhysicalAddressSpace implements IPhysicalAddressSpace {
@@ -238,5 +245,38 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     for (let i = 0; i < data.length; i++) {
       this.write8(address + BigInt(i), data[i]);
     }
+  }
+
+  fetchInstructionBytes(address: Address64, count: number): Uint8Array {
+    if (count <= 0) {
+      throw new Error(`Invalid fetch instruction byte count: ${count}`);
+    }
+
+    const region = this.getRegionAt(address);
+    if (!region) {
+      const mmio = this.getMMIOAt(address);
+      if (mmio) {
+        throw new Error(
+          `Instruction fetch fault at ${formatAddress(address)}: MMIO range "${mmio.name}" is not executable`
+        );
+      }
+      throw new Error(
+        `Instruction fetch fault at ${formatAddress(address)}: unmapped physical memory region`
+      );
+    }
+
+    if (!region.permissions.execute) {
+      throw new Error(
+        `Instruction fetch fault at ${formatAddress(address)}: region "${region.name}" does not have execute permission`
+      );
+    }
+
+    if (address + BigInt(count) > region.baseAddress + region.size) {
+      throw new Error(
+        `Instruction fetch fault at ${formatAddress(address)}: instruction fetch crosses region boundary`
+      );
+    }
+
+    return region.readBytes(address - region.baseAddress, count);
   }
 }

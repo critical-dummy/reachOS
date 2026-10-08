@@ -30,21 +30,24 @@ Browser / Host Environment
 
 ---
 
-## ⚡ Reset Sequence
+## ⚡ Reset Sequence & Boot Topology
 
-The platform executes a deterministic hardware reset sequence:
+The platform executes a deterministic hardware reset sequence following board boot topology:
 
 ```text
 Power / Reset
     ↓
 Board reset (device bus reset & reset vector propagation)
     ↓
-FRT64 CPU reset state (cores placed into RESET state)
-    ↓
-PC points to configured boot entry in Boot ROM
+FRT64 CPU topology partition:
+  ├── Primary Boot CPU → RESET state, PC set to configured Fabric Dessert reset vector
+  └── Secondary CPUs  → PARKED state (held until future OS SMP bring-up)
     ↓
 CPU instruction-fetch boundary accesses Boot ROM via Physical Address Space
+  (enforces execute permissions, neutral requested byte lengths, no fake ISA decoding)
 ```
+
+> **Platform Contract Note**: Boot ROM at `0x00000000` and reset vector at `0x00000000` are strictly a **Fabric Dessert board/platform contract**, not an ISA-specific or Linux-specific boot specification.
 
 ---
 

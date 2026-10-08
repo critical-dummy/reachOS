@@ -15,6 +15,7 @@ export enum Frt64ExecutionFamily {
 
 export enum Frt64CoreRunState {
   RESET = 'RESET',
+  PARKED = 'PARKED',
   HALTED = 'HALTED',
   RUNNING = 'RUNNING',
   PAUSED = 'PAUSED',
@@ -27,6 +28,7 @@ export interface Frt64CoreConfig {
   initialFamily: Frt64ExecutionFamily;
   frequencyHz?: number;
   resetVector?: Address64;
+  isPrimary?: boolean;
 }
 
 export interface Frt64TopologyConfig {
@@ -34,10 +36,12 @@ export interface Frt64TopologyConfig {
   clusters?: number;
   defaultFamily: Frt64ExecutionFamily;
   defaultResetVector?: Address64;
+  primaryCoreId?: number;
 }
 
 export interface Frt64CoreStatus {
   coreId: number;
+  isPrimary: boolean;
   runState: Frt64CoreRunState;
   activeFamily: Frt64ExecutionFamily;
   cyclesExecuted: bigint;
@@ -56,7 +60,6 @@ export interface InstructionFetchResult {
 export interface ExecutionStepResult {
   executed: boolean;
   state: Frt64CoreRunState;
-  reason: 'NO_EXECUTION_ENGINE_ATTACHED' | 'HALTED' | 'FAULT';
-  fetched?: InstructionFetchResult;
+  reason: 'NO_EXECUTION_ENGINE_ATTACHED' | 'PARKED' | 'HALTED' | 'FAULT';
 }
 

@@ -18,6 +18,7 @@ export interface IFabricDessertBoard {
   readonly bootRom: IBootRom;
   readonly bootContract: FabricDessertBootContract;
 
+  start(): void;
   reset(): void;
   powerOff(): void;
 }
@@ -96,6 +97,9 @@ export class FabricDessertBoard implements IFabricDessertBoard {
       writePhysical: (addr: Address64, data: Uint8Array) => {
         this.addressSpace.writeBytes(addr, data);
       },
+      fetchInstructionPhysical: (addr: Address64, size: number) => {
+        return this.addressSpace.fetchInstructionBytes(addr, size);
+      },
     };
     this.cpuBoundary.attachBusMaster(busMaster);
 
@@ -111,9 +115,15 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     return this.config.bootContract;
   }
 
+  start(): void {
+    // Only the primary boot CPU enters the running boot path.
+    // Secondary CPUs remain parked/held in reset.
+    this.cpuBoundary.resumePrimary();
+  }
+
   reset(): void {
     this.deviceBus.resetAllDevices();
-    // Reset CPU cores directly to configured Boot ROM reset vector
+    // Reset CPU cores: primary core enters RESET at bootContract.resetVector; secondary cores are parked
     this.cpuBoundary.resetAll(this.config.bootContract.resetVector);
   }
 

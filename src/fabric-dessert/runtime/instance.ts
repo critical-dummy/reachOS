@@ -90,7 +90,8 @@ export class FabricDessertInstance implements IFabricDessertInstance {
         `Cannot start Fabric Dessert from state "${this.state}". Instance must be READY.`
       );
     }
-    this.board.cpuBoundary.resumeAll();
+    // Startup policy: only the primary boot CPU enters the running boot path
+    this.board.start();
     this.transitionTo(RuntimeLifecycleState.RUNNING);
   }
 
@@ -106,7 +107,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
     if (this.state !== RuntimeLifecycleState.PAUSED) {
       throw new Error(`Cannot resume Fabric Dessert when in state "${this.state}".`);
     }
-    this.board.cpuBoundary.resumeAll();
+    this.board.cpuBoundary.resumePrimary();
     this.transitionTo(RuntimeLifecycleState.RUNNING);
   }
 

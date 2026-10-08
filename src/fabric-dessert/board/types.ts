@@ -10,6 +10,14 @@ export interface MemoryLayoutConfig {
   mmioSizeBytes: Size64;
 }
 
+/**
+ * Fabric Dessert Platform Boot Contract.
+ *
+ * NOTE: The default configuration maps Boot ROM at 0x00000000 and places the reset vector
+ * at 0x00000000. This is strictly a Fabric Dessert board/platform interconnect contract,
+ * NOT an ARM architectural reset rule, an x86 reset rule, or an OS boot protocol requirement.
+ * Specific CPU architectures and operating systems will map to this via dedicated platform layers.
+ */
 export interface FabricDessertBootContract {
   readonly bootRomBase: Address64;
   readonly bootRomSizeBytes: Size64;

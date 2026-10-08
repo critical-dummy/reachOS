@@ -2,11 +2,19 @@ import {Address64, formatAddress, Size64} from '../types';
 import {IPhysicalMemoryRegion} from '../memory/physical-memory';
 import {MemoryPermissions, MemoryRegionType} from '../memory/types';
 
+const PAGE_SIZE_BYTES = 65536; // 64 KiB sparse allocation chunk
+const PAGE_SIZE_BIG = BigInt(PAGE_SIZE_BYTES);
+
 export interface IBootRom extends IPhysicalMemoryRegion {
   readonly resetEntry: Address64;
-  loadPayload(offset: Size64, data: Uint8Array): void;
 }
 
+/**
+ * Fabric Dessert Boot ROM.
+ * A genuinely immutable physical memory region mapped into the platform physical address space.
+ * Backed by sparse allocation so large ROM configurations are not silently truncated.
+ * Contents are established strictly during construction and protected against runtime modification.
+ */
 export class BootRom implements IBootRom {
   readonly id = 'bootrom';
   readonly name = 'Fabric Dessert Boot ROM';
@@ -20,7 +28,8 @@ export class BootRom implements IBootRom {
   };
   readonly resetEntry: Address64;
 
-  private readonly storage: Uint8Array;
+  // Sparse 64 KiB page storage ensuring no silent size caps
+  private readonly pages = new Map<number, Uint8Array>();
 
   constructor(
     baseAddress: Address64,
@@ -42,37 +51,50 @@ export class BootRom implements IBootRom {
     this.size = size;
     this.resetEntry = resetEntry;
 
-    // Allocate physical ROM storage (capped safely at 64MB if huge)
-    const allocSize = Number(size > 67108864n ? 67108864n : size);
-    this.storage = new Uint8Array(allocSize);
-
-    if (initialPayload) {
-      this.loadPayload(0n, initialPayload);
+    if (initialPayload && initialPayload.length > 0) {
+      this.provisionPayload(initialPayload);
     }
   }
 
-  loadPayload(offset: Size64, data: Uint8Array): void {
-    const off = Number(offset);
-    if (off < 0 || off + data.length > this.storage.length) {
+  /**
+   * Internal constructor-only provisioning mechanism.
+   * Not exposed on IBootRom interface.
+   */
+  private provisionPayload(payload: Uint8Array): void {
+    if (BigInt(payload.length) > this.size) {
       throw new Error(
-        `Payload size ${data.length} at offset ${off} exceeds Boot ROM capacity ${this.storage.length}`
+        `Initial payload size (${payload.length} bytes) exceeds Boot ROM capacity (${this.size} bytes)`
       );
     }
-    this.storage.set(data, off);
+
+    for (let i = 0; i < payload.length; i++) {
+      const offsetBig = BigInt(i);
+      const pageIdx = Number(offsetBig / PAGE_SIZE_BIG);
+      const pageOffset = Number(offsetBig % PAGE_SIZE_BIG);
+
+      let page = this.pages.get(pageIdx);
+      if (!page) {
+        page = new Uint8Array(PAGE_SIZE_BYTES);
+        this.pages.set(pageIdx, page);
+      }
+      page[pageOffset] = payload[i];
+    }
   }
 
   private checkBounds(offset: Size64, count: number): void {
     if (offset < 0n || offset + BigInt(count) > this.size) {
       throw new Error(
-        `Boot ROM access out of bounds: offset ${offset}, count ${count}, size ${this.size}`
+        `Boot ROM access out of bounds: offset 0x${offset.toString(16)}, count ${count}, size 0x${this.size.toString(16)}`
       );
     }
   }
 
   read8(offset: Size64): number {
     this.checkBounds(offset, 1);
-    const off = Number(offset);
-    return off < this.storage.length ? this.storage[off] : 0;
+    const pageIdx = Number(offset / PAGE_SIZE_BIG);
+    const pageOffset = Number(offset % PAGE_SIZE_BIG);
+    const page = this.pages.get(pageIdx);
+    return page ? page[pageOffset] : 0;
   }
 
   read16(offset: Size64): number {
@@ -124,10 +146,6 @@ export class BootRom implements IBootRom {
 
   readBytes(offset: Size64, count: number): Uint8Array {
     this.checkBounds(offset, count);
-    const off = Number(offset);
-    if (off + count <= this.storage.length) {
-      return this.storage.slice(off, off + count);
-    }
     const result = new Uint8Array(count);
     for (let i = 0; i < count; i++) {
       result[i] = this.read8(offset + BigInt(i));
@@ -142,7 +160,6 @@ export class BootRom implements IBootRom {
   }
 
   clear(): void {
-    // ROM clear is not allowed at runtime
-    throw new Error('Clear operation not supported on read-only Boot ROM');
+    throw new Error('Clear operation not supported on immutable Boot ROM');
   }
 }
