@@ -1,4 +1,5 @@
-import {FabricDessertBoardConfig} from './types';
+import {FabricDessertBoardConfig, FabricDessertBootContract} from './types';
+import {BootRom, IBootRom} from './boot-rom';
 import {Frt64CpuBoundary, IFrt64BusMaster, IFrt64CpuBoundary} from '../arch/frt64/boundary';
 import {IPhysicalAddressSpace, PhysicalAddressSpace} from '../memory/address-space';
 import {SparsePhysicalMemoryRegion} from '../memory/physical-memory';
@@ -14,6 +15,8 @@ export interface IFabricDessertBoard {
   readonly cpuBoundary: IFrt64CpuBoundary;
   readonly deviceBus: IDeviceBus;
   readonly displayDevice: IFabricDessertDisplayDevice;
+  readonly bootRom: IBootRom;
+  readonly bootContract: FabricDessertBootContract;
 
   reset(): void;
   powerOff(): void;
@@ -25,6 +28,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
   readonly cpuBoundary: IFrt64CpuBoundary;
   readonly deviceBus: IDeviceBus;
   readonly displayDevice: IFabricDessertDisplayDevice;
+  readonly bootRom: IBootRom;
 
   constructor(config: FabricDessertBoardConfig) {
     this.config = config;
@@ -32,7 +36,16 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     // 1. Initialize Address Space
     this.addressSpace = new PhysicalAddressSpace();
 
-    // 2. Map Configured RAM
+    // 2. Map Boot ROM into Physical Address Space
+    this.bootRom = new BootRom(
+      config.bootContract.bootRomBase,
+      config.bootContract.bootRomSizeBytes,
+      config.bootContract.resetVector,
+      config.bootContract.initialPayload
+    );
+    this.addressSpace.mapRegion(this.bootRom);
+
+    // 3. Map Configured RAM
     const ramRegion = new SparsePhysicalMemoryRegion(
       'sysram',
       'System RAM',
@@ -43,7 +56,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     );
     this.addressSpace.mapRegion(ramRegion);
 
-    // Optional ROM
+    // Optional Additional ROM
     if (config.memoryLayout.romBase !== undefined && config.memoryLayout.romSizeBytes) {
       const romRegion = new SparsePhysicalMemoryRegion(
         'sysrom',
@@ -56,7 +69,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
       this.addressSpace.mapRegion(romRegion);
     }
 
-    // 3. Initialize Device Bus with configured MMIO window
+    // 4. Initialize Device Bus with configured MMIO window
     this.deviceBus = new DeviceBus(
       {
         mmioWindowBase: config.memoryLayout.mmioBase,
@@ -65,14 +78,17 @@ export class FabricDessertBoard implements IFabricDessertBoard {
       this.addressSpace
     );
 
-    // 4. Register Platform Display Device
+    // 5. Register Platform Display Device
     this.displayDevice = new FabricDessertDisplayDevice();
     this.deviceBus.registerDevice(this.displayDevice);
 
-    // 5. Initialize FRT64 CPU Boundary
-    this.cpuBoundary = new Frt64CpuBoundary(config.cpuTopology);
+    // 6. Initialize FRT64 CPU Boundary with configured reset vector
+    this.cpuBoundary = new Frt64CpuBoundary({
+      ...config.cpuTopology,
+      defaultResetVector: config.bootContract.resetVector,
+    });
 
-    // 6. Connect CPU Boundary as bus master to physical address space
+    // 7. Connect CPU Boundary as bus master to physical address space
     const busMaster: IFrt64BusMaster = {
       readPhysical: (addr: Address64, size: number) => {
         return this.addressSpace.readBytes(addr, size);
@@ -83,7 +99,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     };
     this.cpuBoundary.attachBusMaster(busMaster);
 
-    // 7. Connect DeviceBus interrupt routing to CPU boundary
+    // 8. Connect DeviceBus interrupt routing to CPU boundary
     this.deviceBus.addInterruptListener((vector: number, level: boolean) => {
       if (level) {
         this.cpuBoundary.signalGlobalInterrupt(vector);
@@ -91,9 +107,14 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     });
   }
 
+  get bootContract(): FabricDessertBootContract {
+    return this.config.bootContract;
+  }
+
   reset(): void {
     this.deviceBus.resetAllDevices();
-    this.cpuBoundary.resetAll();
+    // Reset CPU cores directly to configured Boot ROM reset vector
+    this.cpuBoundary.resetAll(this.config.bootContract.resetVector);
   }
 
   powerOff(): void {

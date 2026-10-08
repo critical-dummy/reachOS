@@ -135,6 +135,10 @@ export function createFabricDessertInstance(
       ...DEFAULT_FABRIC_DESSERT_CONFIG.memoryLayout,
       ...(config?.memoryLayout ?? {}),
     },
+    bootContract: {
+      ...DEFAULT_FABRIC_DESSERT_CONFIG.bootContract,
+      ...(config?.bootContract ?? {}),
+    },
   };
 
   return new FabricDessertInstance(mergedConfig);

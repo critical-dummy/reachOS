@@ -10,11 +10,19 @@ export interface MemoryLayoutConfig {
   mmioSizeBytes: Size64;
 }
 
+export interface FabricDessertBootContract {
+  readonly bootRomBase: Address64;
+  readonly bootRomSizeBytes: Size64;
+  readonly resetVector: Address64;
+  readonly initialPayload?: Uint8Array;
+}
+
 export interface FabricDessertBoardConfig {
   platformName: string;
   boardRevision: string;
   cpuTopology: Frt64TopologyConfig;
   memoryLayout: MemoryLayoutConfig;
+  bootContract: FabricDessertBootContract;
 }
 
 export const DEFAULT_FABRIC_DESSERT_CONFIG: FabricDessertBoardConfig = {
@@ -24,13 +32,17 @@ export const DEFAULT_FABRIC_DESSERT_CONFIG: FabricDessertBoardConfig = {
     coreCount: 4,
     clusters: 1,
     defaultFamily: Frt64ExecutionFamily.ARM_64,
+    defaultResetVector: 0x00000000n,
   },
   memoryLayout: {
-    // 0x0000_0000 -> 0x7FFF_FFFF: 2 GiB configurable default RAM
-    ramBase: 0x00000000n,
-    ramSizeBytes: 0x80000000n, // 2 GiB
-    // 0x8000_0000 -> 0xFFFF_FFFF: 2 GiB MMIO window
+    ramBase: 0x00100000n,
+    ramSizeBytes: 0x7ff00000n, // 2 GiB - 1 MiB
     mmioBase: 0x80000000n,
     mmioSizeBytes: 0x80000000n, // 2 GiB
+  },
+  bootContract: {
+    bootRomBase: 0x00000000n,
+    bootRomSizeBytes: 0x00100000n, // 1 MiB Boot ROM
+    resetVector: 0x00000000n,
   },
 };

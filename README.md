@@ -16,14 +16,34 @@ Browser / Host Environment
 └── Angular Shell (src/app/)
     └── Fabric Dessert Runtime (src/fabric-dessert/)
         ├── Board / Platform (FabricDessertBoard)
-        ├── FRT64 CPU Boundary (ARM 32/64, x86 32/64)
+        ├── Boot Substrate (BootRom & FabricDessertBootContract)
+        ├── FRT64 CPU Boundary (ARM 32/64, x86 32/64, PC & Fetch boundary)
         ├── Memory Space (64-bit Physical Address Space & Sparse RAM)
         ├── Device Model & Bus (MMIO aperture router & IRQ lines)
         └── Display Subsystem
             ├── Display Controller Device (MMIO & VSYNC IRQ)
             ├── Framebuffer (1080 × 2424 RGBA8888 pixel buffer)
             ├── System Renderer (Platform-side presentation coordinator)
-            └── Canvas Backend (Deterministic 1:1 host adapter)
+            ├── Canvas Backend (Deterministic 1:1 host adapter)
+            └── Default Console Font (font_sun_8x16)
+```
+
+---
+
+## ⚡ Reset Sequence
+
+The platform executes a deterministic hardware reset sequence:
+
+```text
+Power / Reset
+    ↓
+Board reset (device bus reset & reset vector propagation)
+    ↓
+FRT64 CPU reset state (cores placed into RESET state)
+    ↓
+PC points to configured boot entry in Boot ROM
+    ↓
+CPU instruction-fetch boundary accesses Boot ROM via Physical Address Space
 ```
 
 ---
@@ -31,8 +51,9 @@ Browser / Host Environment
 ## 🧩 Subsystem Details
 
 ### 1. Board & Platform (`src/fabric-dessert/board/`)
-* **`FabricDessertBoard`**: The central interconnect tying CPU boundaries, physical memory spaces, and device busses.
-* Fully dynamic hardware topology—CPU core counts, RAM sizes, and MMIO address windows are configurable and not locked to artificial small-machine constraints.
+* **`FabricDessertBoard`**: The central interconnect tying CPU boundaries, physical memory spaces, Boot ROM, and device busses.
+* Fully dynamic hardware topology—CPU core counts, RAM sizes, Boot ROM location/size, and MMIO address windows are configurable and not locked to artificial small-machine constraints.
+* **`BootRom` & `FabricDessertBootContract`**: Read-only physical memory region with explicit reset vector mapping, boundary protection, and initial payload support.
 
 ### 2. CPU Integration Boundary (`src/fabric-dessert/arch/frt64/`)
 * **FRT64 MultiSupport Architecture**: External CPU architecture boundary integrating:
@@ -57,6 +78,7 @@ A deterministic, unscaled display pipeline:
 2. **Framebuffer (`Framebuffer`)**: Physical pixel storage at **1080 × 2424 × 4 bytes (RGBA8888)** with deterministic 1:1 coordinate mapping.
 3. **System Renderer (`SystemRenderer`)**: Platform-side renderer with zero DOM or browser dependencies.
 4. **Canvas Backend (`CanvasBackend`)**: Host-side adapter blitting pixel buffers directly into the 1080 × 2424 Canvas without interpolation or layout-driven scaling.
+5. **Default Console Font (`font_sun_8x16`)**: Standard 8×16 bitmap font (`fontdata_sun8x16`, 256 glyphs, 4096 bytes from the Linux kernel console specification) established as the default font for the bootloader and kernel console.
 
 ---
 

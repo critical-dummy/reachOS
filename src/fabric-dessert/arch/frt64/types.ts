@@ -4,6 +4,8 @@
  * This is an external CPU architecture interface contract for Fabric Dessert.
  */
 
+import {Address64} from '../../types';
+
 export enum Frt64ExecutionFamily {
   ARM_32 = 'ARM_32',
   ARM_64 = 'ARM_64',
@@ -24,12 +26,14 @@ export interface Frt64CoreConfig {
   clusterId?: number;
   initialFamily: Frt64ExecutionFamily;
   frequencyHz?: number;
+  resetVector?: Address64;
 }
 
 export interface Frt64TopologyConfig {
   coreCount: number;
   clusters?: number;
   defaultFamily: Frt64ExecutionFamily;
+  defaultResetVector?: Address64;
 }
 
 export interface Frt64CoreStatus {
@@ -37,4 +41,22 @@ export interface Frt64CoreStatus {
   runState: Frt64CoreRunState;
   activeFamily: Frt64ExecutionFamily;
   cyclesExecuted: bigint;
+  pc: Address64;
+  resetVector: Address64;
 }
+
+export interface InstructionFetchResult {
+  success: boolean;
+  address: Address64;
+  sizeBytes: number;
+  bytes?: Uint8Array;
+  fault?: string;
+}
+
+export interface ExecutionStepResult {
+  executed: boolean;
+  state: Frt64CoreRunState;
+  reason: 'NO_EXECUTION_ENGINE_ATTACHED' | 'HALTED' | 'FAULT';
+  fetched?: InstructionFetchResult;
+}
+

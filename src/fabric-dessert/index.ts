@@ -12,6 +12,7 @@ export * from './memory/address-space';
 export * from './device/types';
 export * from './device/bus';
 export * from './board/types';
+export * from './board/boot-rom';
 export * from './board/board';
 export * from './runtime/lifecycle';
 export * from './runtime/instance';

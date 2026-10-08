@@ -15,10 +15,15 @@ describe('Fabric Dessert Core Foundation', () => {
         coreCount: 8,
         defaultFamily: Frt64ExecutionFamily.ARM_64,
       },
+      bootContract: {
+        bootRomBase: 0x00000000n,
+        bootRomSizeBytes: 0x00100000n,
+        resetVector: 0x00000000n,
+      },
       memoryLayout: {
-        ramBase: 0x00000000n,
+        ramBase: 0x00100000n,
         ramSizeBytes: 0x100000000n, // 4 GiB
-        mmioBase: 0x100000000n,
+        mmioBase: 0x200000000n,
         mmioSizeBytes: 0x100000000n, // 4 GiB
       },
     });
@@ -71,11 +76,11 @@ describe('Fabric Dessert Core Foundation', () => {
     const instance = createFabricDessertInstance();
     const mem = instance.memory;
 
-    mem.write32(0x1000n, 0x12345678);
-    expect(mem.read32(0x1000n)).toBe(0x12345678);
+    mem.write32(0x00101000n, 0x12345678);
+    expect(mem.read32(0x00101000n)).toBe(0x12345678);
 
-    mem.write64(0x2000n, 0x0123456789abcdefn);
-    expect(mem.read64(0x2000n)).toBe(0x0123456789abcdefn);
+    mem.write64(0x00102000n, 0x0123456789abcdefn);
+    expect(mem.read64(0x00102000n)).toBe(0x0123456789abcdefn);
   });
 
   it('registers devices and routes MMIO and interrupts dynamically', () => {
@@ -223,6 +228,153 @@ describe('Fabric Dessert Core Foundation', () => {
         const readBack = instance.memory.read32(fbBase);
         expect(readBack).toBe(0x11223344);
       }
+    });
+
+    it('verifies font_sun_8x16 as default bootloader/kernel font', async () => {
+      const instance = createFabricDessertInstance();
+      const fb = instance.board.displayDevice.framebuffer;
+      const {font_sun_8x16, DEFAULT_BOOT_FONT} = await import('./display/font-sun8x16');
+
+      expect(DEFAULT_BOOT_FONT).toBe(font_sun_8x16);
+      expect(font_sun_8x16.name).toBe('font_sun_8x16');
+      expect(font_sun_8x16.width).toBe(8);
+      expect(font_sun_8x16.height).toBe(16);
+      expect(font_sun_8x16.charCount).toBe(256);
+      expect(font_sun_8x16.data.length).toBe(4096);
+
+      // Glyph for 'A' (65) should have 16 bytes
+      const glyphA = font_sun_8x16.getGlyph(65);
+      expect(glyphA.length).toBe(16);
+
+      // Render string to framebuffer
+      font_sun_8x16.drawString(fb, 0, 0, 'reachOS', 255, 255, 255, 255, 0, 0, 0, 255);
+      expect(fb.isDirty()).toBe(true);
+
+      // Ensure pixels were modified in the 8x16 cell area
+      let nonZeroCount = 0;
+      for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 8 * 7; x++) {
+          if (fb.readPixel(x, y) !== 0) {
+            nonZeroCount++;
+          }
+        }
+      }
+      expect(nonZeroCount).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Fabric Dessert Minimum Boot Substrate', () => {
+    it('maps Boot ROM into physical address space with configured bounds', () => {
+      const instance = createFabricDessertInstance();
+      const bootRom = instance.board.bootRom;
+      const mem = instance.memory;
+
+      expect(bootRom.id).toBe('bootrom');
+      expect(bootRom.baseAddress).toBe(instance.board.bootContract.bootRomBase);
+      expect(bootRom.size).toBe(instance.board.bootContract.bootRomSizeBytes);
+
+      // Verify physical address space resolves Boot ROM
+      const regionAtBase = mem.getRegionAt(bootRom.baseAddress);
+      expect(regionAtBase?.id).toBe('bootrom');
+    });
+
+    it('enforces read-only permissions on Boot ROM', () => {
+      const instance = createFabricDessertInstance();
+      const mem = instance.memory;
+      const bootBase = instance.board.bootContract.bootRomBase;
+
+      // Reading succeeds without error
+      expect(mem.read32(bootBase)).toBe(0);
+
+      // Writing to Boot ROM throws permission error
+      expect(() => {
+        mem.write32(bootBase, 0x12345678);
+      }).toThrow(/read-only/i);
+
+      expect(() => {
+        mem.write8(bootBase, 0xff);
+      }).toThrow(/read-only/i);
+    });
+
+    it('places FRT64 execution state at the configured boot entry on board reset', () => {
+      const customResetVector = 0x00000100n;
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: customResetVector,
+        },
+      });
+
+      instance.board.reset();
+
+      const core0 = instance.cpu.getCore(0);
+      expect(core0).toBeDefined();
+      expect(core0?.pc).toBe(customResetVector);
+      expect(core0?.resetVector).toBe(customResetVector);
+
+      const status = core0?.getStatus();
+      expect(status?.pc).toBe(customResetVector);
+      expect(status?.runState).toBe('RESET');
+    });
+
+    it('ensures configured reset vector corresponds to Boot ROM range', () => {
+      const bootRomBase = 0x00000000n;
+      const bootRomSize = 0x00100000n;
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase,
+          bootRomSizeBytes: bootRomSize,
+          resetVector: 0x00000040n,
+        },
+      });
+
+      const entry = instance.board.bootContract.resetVector;
+      expect(entry >= bootRomBase).toBe(true);
+      expect(entry < bootRomBase + bootRomSize).toBe(true);
+
+      const regionAtEntry = instance.memory.getRegionAt(entry);
+      expect(regionAtEntry?.id).toBe('bootrom');
+    });
+
+    it('reaches Boot ROM through the physical memory interface on instruction fetch', () => {
+      // Prepare a test boot payload (e.g. 4 distinct bytes at reset entry)
+      const testPayload = new Uint8Array([0x78, 0x56, 0x34, 0x12]);
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: testPayload,
+        },
+      });
+
+      instance.board.reset();
+      const core0 = instance.cpu.getCore(0);
+      expect(core0).toBeDefined();
+
+      // Fetch first instruction through the CPU fetch boundary
+      const fetchResult = core0?.fetchInstruction(4);
+      expect(fetchResult?.success).toBe(true);
+      expect(fetchResult?.address).toBe(0x00000000n);
+      expect(fetchResult?.bytes).toBeDefined();
+      expect(fetchResult?.bytes?.[0]).toBe(0x78);
+      expect(fetchResult?.bytes?.[1]).toBe(0x56);
+      expect(fetchResult?.bytes?.[2]).toBe(0x34);
+      expect(fetchResult?.bytes?.[3]).toBe(0x12);
+    });
+
+    it('does NOT execute fake instructions when step is called without an execution engine', () => {
+      const instance = createFabricDessertInstance();
+      instance.board.reset();
+
+      const core0 = instance.cpu.getCore(0);
+      expect(core0).toBeDefined();
+
+      const stepResult = core0?.step();
+      expect(stepResult?.executed).toBe(false);
+      expect(stepResult?.reason).toBe('NO_EXECUTION_ENGINE_ATTACHED');
+      expect(stepResult?.fetched?.success).toBe(true);
     });
   });
 });
