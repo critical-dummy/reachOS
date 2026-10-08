@@ -1,0 +1,8 @@
+{
+  "name": "reachOS",
+  "description": "The OS project for the Angular Framework.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
