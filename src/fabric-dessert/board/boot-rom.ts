@@ -5,6 +5,7 @@ import {
   formatAddress,
   Size64,
 } from '../types';
+import {PhysicalAccessContext} from '../memory/access-context';
 import {IPhysicalMemoryRegion} from '../memory/physical-memory';
 import {MemoryPermissions, MemoryRegionType} from '../memory/types';
 
@@ -94,7 +95,8 @@ export class BootRom implements IBootRom {
     }
   }
 
-  read8(offset: Size64): number {
+  read8(offset: Size64, _context?: PhysicalAccessContext): number {
+    void _context;
     this.checkBounds(offset, 1);
     const pageIdx = offset / PAGE_SIZE_BIG;
     const pageOffset = Number(offset % PAGE_SIZE_BIG);
@@ -102,65 +104,70 @@ export class BootRom implements IBootRom {
     return page ? page[pageOffset] : 0;
   }
 
-  read16(offset: Size64): number {
+  read16(offset: Size64, context?: PhysicalAccessContext): number {
     this.checkBounds(offset, 2);
-    const b0 = this.read8(offset);
-    const b1 = this.read8(offset + 1n);
+    const b0 = this.read8(offset, context);
+    const b1 = this.read8(offset + 1n, context);
     return b0 | (b1 << 8);
   }
 
-  read32(offset: Size64): number {
+  read32(offset: Size64, context?: PhysicalAccessContext): number {
     this.checkBounds(offset, 4);
-    const b0 = this.read8(offset);
-    const b1 = this.read8(offset + 1n);
-    const b2 = this.read8(offset + 2n);
-    const b3 = this.read8(offset + 3n);
+    const b0 = this.read8(offset, context);
+    const b1 = this.read8(offset + 1n, context);
+    const b2 = this.read8(offset + 2n, context);
+    const b3 = this.read8(offset + 3n, context);
     return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) >>> 0;
   }
 
-  read64(offset: Size64): bigint {
+  read64(offset: Size64, context?: PhysicalAccessContext): bigint {
     this.checkBounds(offset, 8);
-    const low = BigInt(this.read32(offset));
-    const high = BigInt(this.read32(offset + 4n));
+    const low = BigInt(this.read32(offset, context));
+    const high = BigInt(this.read32(offset + 4n, context));
     return low | (high << 32n);
   }
 
-  write8(_offset: Size64, _value: number): void {
+  write8(_offset: Size64, _value: number, _context?: PhysicalAccessContext): void {
     void _offset;
     void _value;
+    void _context;
     throw new Error('Write permission denied on Boot ROM: memory region is read-only');
   }
 
-  write16(_offset: Size64, _value: number): void {
+  write16(_offset: Size64, _value: number, _context?: PhysicalAccessContext): void {
     void _offset;
     void _value;
+    void _context;
     throw new Error('Write permission denied on Boot ROM: memory region is read-only');
   }
 
-  write32(_offset: Size64, _value: number): void {
+  write32(_offset: Size64, _value: number, _context?: PhysicalAccessContext): void {
     void _offset;
     void _value;
+    void _context;
     throw new Error('Write permission denied on Boot ROM: memory region is read-only');
   }
 
-  write64(_offset: Size64, _value: bigint): void {
+  write64(_offset: Size64, _value: bigint, _context?: PhysicalAccessContext): void {
     void _offset;
     void _value;
+    void _context;
     throw new Error('Write permission denied on Boot ROM: memory region is read-only');
   }
 
-  readBytes(offset: Size64, count: number): Uint8Array {
+  readBytes(offset: Size64, count: number, context?: PhysicalAccessContext): Uint8Array {
     this.checkBounds(offset, count);
     const result = new Uint8Array(count);
     for (let i = 0; i < count; i++) {
-      result[i] = this.read8(offset + BigInt(i));
+      result[i] = this.read8(offset + BigInt(i), context);
     }
     return result;
   }
 
-  writeBytes(_offset: Size64, _src: Uint8Array): void {
+  writeBytes(_offset: Size64, _src: Uint8Array, _context?: PhysicalAccessContext): void {
     void _offset;
     void _src;
+    void _context;
     throw new Error('Write permission denied on Boot ROM: memory region is read-only');
   }
 

@@ -12,11 +12,13 @@ import {
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
+  IPhysicalMemoryRegion,
   isValidAddress64,
   MemoryRegionType,
   PhysicalAccessContext,
   PhysicalAddressSpace,
   RuntimeLifecycleState,
+  Size64,
   SparsePhysicalMemoryRegion,
   toAddress64,
 } from './index';
@@ -1097,6 +1099,148 @@ describe('Fabric Dessert Core Foundation', () => {
       // Write to read-only Boot ROM faults regardless of context
       expect(() => mem.write32(bootBase, 0xdeadbeef, cpuCtx)).toThrow(/read-only/i);
       expect(() => mem.write8(bootBase, 0xff, devCtx)).toThrow(/read-only/i);
+    });
+
+    it('5. propagates PhysicalAccessContext through physical memory regions and instruction fetch', () => {
+      // Create a recording physical memory region that captures received access context
+      interface AccessRecord {
+        op: string;
+        offset: Size64;
+        context?: PhysicalAccessContext;
+      }
+      const records: AccessRecord[] = [];
+
+      class RecordingMemoryRegion implements IPhysicalMemoryRegion {
+        readonly id = 'rec_ram';
+        readonly name = 'Recording RAM';
+        readonly baseAddress = 0x2000_0000n;
+        readonly size = 0x10000n;
+        readonly type = MemoryRegionType.RAM;
+        readonly permissions = {read: true, write: true, execute: true};
+        private readonly storage = new Uint8Array(65536);
+
+        read8(offset: Size64, context?: PhysicalAccessContext): number {
+          records.push({op: 'read8', offset, context});
+          return this.storage[Number(offset)];
+        }
+        read16(offset: Size64, context?: PhysicalAccessContext): number {
+          records.push({op: 'read16', offset, context});
+          return this.read8(offset, context) | (this.read8(offset + 1n, context) << 8);
+        }
+        read32(offset: Size64, context?: PhysicalAccessContext): number {
+          records.push({op: 'read32', offset, context});
+          return (
+            (this.read8(offset, context) |
+              (this.read8(offset + 1n, context) << 8) |
+              (this.read8(offset + 2n, context) << 16) |
+              (this.read8(offset + 3n, context) << 24)) >>>
+            0
+          );
+        }
+        read64(offset: Size64, context?: PhysicalAccessContext): bigint {
+          records.push({op: 'read64', offset, context});
+          return BigInt(this.read32(offset, context)) | (BigInt(this.read32(offset + 4n, context)) << 32n);
+        }
+        write8(offset: Size64, value: number, context?: PhysicalAccessContext): void {
+          records.push({op: 'write8', offset, context});
+          this.storage[Number(offset)] = value & 0xff;
+        }
+        write16(offset: Size64, value: number, context?: PhysicalAccessContext): void {
+          records.push({op: 'write16', offset, context});
+          this.write8(offset, value & 0xff, context);
+          this.write8(offset + 1n, (value >> 8) & 0xff, context);
+        }
+        write32(offset: Size64, value: number, context?: PhysicalAccessContext): void {
+          records.push({op: 'write32', offset, context});
+          this.write8(offset, value & 0xff, context);
+          this.write8(offset + 1n, (value >> 8) & 0xff, context);
+          this.write8(offset + 2n, (value >> 16) & 0xff, context);
+          this.write8(offset + 3n, (value >>> 24) & 0xff, context);
+        }
+        write64(offset: Size64, value: bigint, context?: PhysicalAccessContext): void {
+          records.push({op: 'write64', offset, context});
+          this.write32(offset, Number(value & 0xffffffffn), context);
+          this.write32(offset + 4n, Number((value >> 32n) & 0xffffffffn), context);
+        }
+        readBytes(offset: Size64, count: number, context?: PhysicalAccessContext): Uint8Array {
+          records.push({op: 'readBytes', offset, context});
+          const res = new Uint8Array(count);
+          for (let i = 0; i < count; i++) {
+            res[i] = this.read8(offset + BigInt(i), context);
+          }
+          return res;
+        }
+        writeBytes(offset: Size64, src: Uint8Array, context?: PhysicalAccessContext): void {
+          records.push({op: 'writeBytes', offset, context});
+          for (let i = 0; i < src.length; i++) {
+            this.write8(offset + BigInt(i), src[i], context);
+          }
+        }
+        clear(): void {
+          this.storage.fill(0);
+        }
+      }
+
+      const recRegion = new RecordingMemoryRegion();
+      const addrSpace = new PhysicalAddressSpace();
+      addrSpace.mapRegion(recRegion);
+
+      const cpu0Context = createCpuAccessContext(0, 0);
+      const cpu1Context = createCpuAccessContext(1, 0);
+      const devContext = createDeviceAccessContext('test_dma');
+
+      // 1. read8 / read16 / read32 / read64 with CPU context
+      records.length = 0;
+      addrSpace.read8(0x2000_0000n, cpu0Context);
+      expect(records[0]?.context).toEqual(cpu0Context);
+
+      records.length = 0;
+      addrSpace.read16(0x2000_0002n, cpu1Context);
+      expect(records.every((r) => r.context === cpu1Context)).toBe(true);
+
+      records.length = 0;
+      addrSpace.read32(0x2000_0004n, devContext);
+      expect(records.every((r) => r.context === devContext)).toBe(true);
+
+      records.length = 0;
+      addrSpace.read64(0x2000_0008n, cpu0Context);
+      expect(records.every((r) => r.context === cpu0Context)).toBe(true);
+
+      // 2. write8 / write16 / write32 / write64 with contexts
+      records.length = 0;
+      addrSpace.write8(0x2000_0010n, 0x42, cpu1Context);
+      expect(records[0]?.context).toEqual(cpu1Context);
+
+      records.length = 0;
+      addrSpace.write16(0x2000_0012n, 0x1234, devContext);
+      expect(records.every((r) => r.context === devContext)).toBe(true);
+
+      records.length = 0;
+      addrSpace.write32(0x2000_0014n, 0xabcdef, cpu0Context);
+      expect(records.every((r) => r.context === cpu0Context)).toBe(true);
+
+      records.length = 0;
+      addrSpace.write64(0x2000_0018n, 0x1122334455667788n, devContext);
+      expect(records.every((r) => r.context === devContext)).toBe(true);
+
+      // 3. readBytes fast-path (contained within single region) forwards context
+      records.length = 0;
+      addrSpace.readBytes(0x2000_0020n, 4, cpu0Context);
+      expect(records[0]?.op).toBe('readBytes');
+      expect(records[0]?.context).toEqual(cpu0Context);
+
+      // 4. writeBytes fast-path (contained within single region) forwards context
+      records.length = 0;
+      addrSpace.writeBytes(0x2000_0030n, new Uint8Array([1, 2, 3]), devContext);
+      expect(records[0]?.op).toBe('writeBytes');
+      expect(records[0]?.context).toEqual(devContext);
+
+      // 5. Instruction fetch forwards context to executable region
+      records.length = 0;
+      addrSpace.fetchInstructionBytes(0x2000_0040n, 4, cpu1Context);
+      expect(records[0]?.op).toBe('readBytes');
+      expect(records[0]?.context).toEqual(cpu1Context);
+      expect(records.every((r) => r.context === cpu1Context)).toBe(true);
     });
   });
 });

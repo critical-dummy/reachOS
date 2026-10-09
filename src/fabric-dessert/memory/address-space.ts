@@ -151,7 +151,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
-      return region.read8(address - region.baseAddress);
+      return region.read8(address - region.baseAddress, context);
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
@@ -164,7 +164,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
-      return region.read16(address - region.baseAddress);
+      return region.read16(address - region.baseAddress, context);
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
@@ -177,7 +177,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
-      return region.read32(address - region.baseAddress);
+      return region.read32(address - region.baseAddress, context);
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
@@ -190,7 +190,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
-      return region.read64(address - region.baseAddress);
+      return region.read64(address - region.baseAddress, context);
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
@@ -203,7 +203,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
-      region.write8(address - region.baseAddress, value);
+      region.write8(address - region.baseAddress, value, context);
       return;
     }
     const mmio = this.getMMIOAt(address);
@@ -218,7 +218,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
-      region.write16(address - region.baseAddress, value);
+      region.write16(address - region.baseAddress, value, context);
       return;
     }
     const mmio = this.getMMIOAt(address);
@@ -233,7 +233,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
-      region.write32(address - region.baseAddress, value);
+      region.write32(address - region.baseAddress, value, context);
       return;
     }
     const mmio = this.getMMIOAt(address);
@@ -248,7 +248,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
-      region.write64(address - region.baseAddress, value);
+      region.write64(address - region.baseAddress, value, context);
       return;
     }
     const mmio = this.getMMIOAt(address);
@@ -263,7 +263,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, count);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(count) <= region.baseAddress + region.size) {
-      return region.readBytes(address - region.baseAddress, count);
+      return region.readBytes(address - region.baseAddress, count, context);
     }
     const result = new Uint8Array(count);
     for (let i = 0; i < count; i++) {
@@ -276,7 +276,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     this.checkAccessRange(address, data.length);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(data.length) <= region.baseAddress + region.size) {
-      region.writeBytes(address - region.baseAddress, data);
+      region.writeBytes(address - region.baseAddress, data, context);
       return;
     }
     for (let i = 0; i < data.length; i++) {
@@ -284,9 +284,8 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
   }
 
-  fetchInstructionBytes(address: Address64, count: number, _context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): Uint8Array {
+  fetchInstructionBytes(address: Address64, count: number, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): Uint8Array {
     this.checkAccessRange(address, count);
-    void _context;
 
     const region = this.getRegionAt(address);
     if (!region) {
@@ -313,6 +312,6 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
       );
     }
 
-    return region.readBytes(address - region.baseAddress, count);
+    return region.readBytes(address - region.baseAddress, count, context);
   }
 }
