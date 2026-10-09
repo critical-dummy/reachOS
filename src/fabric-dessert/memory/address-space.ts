@@ -308,7 +308,18 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
         return result;
       }
       if (typeof mmio.handler.readBytes === 'function') {
-        return mmio.handler.readBytes(address - mmio.baseAddress, count, context);
+        const result = mmio.handler.readBytes(address - mmio.baseAddress, count, context);
+        if (!(result instanceof Uint8Array)) {
+          throw new Error(
+            `MMIO range "${mmio.name}" bulk readBytes returned invalid type: expected Uint8Array, got ${result === null ? 'null' : typeof result}`
+          );
+        }
+        if (result.length !== count) {
+          throw new Error(
+            `MMIO range "${mmio.name}" bulk readBytes returned invalid length: expected ${count} bytes, got ${result.length} bytes`
+          );
+        }
+        return result;
       }
       throw new Error(
         `MMIO range "${mmio.name}" handler does not implement bulk readBytes for request of size ${count}`

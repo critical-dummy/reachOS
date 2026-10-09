@@ -1575,5 +1575,128 @@ describe('Fabric Dessert Core Foundation', () => {
       }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
       expect(bulkInvocations.length).toBe(0);
     });
+
+    it('9. tests the real display framebuffer MMIO path via instance.memory and registered display device', () => {
+      const instance = createFabricDessertInstance();
+      const displayDevice = instance.board.displayDevice;
+      expect(displayDevice).toBeDefined();
+
+      const fbBase = displayDevice.getFramebufferApertureBase();
+      expect(typeof fbBase).toBe('bigint');
+      expect(fbBase >= instance.board.config.memoryLayout.mmioBase).toBe(true);
+
+      // Choose a valid framebuffer offset and a test buffer larger than 8 bytes
+      const offset = 0x2000;
+      const testData = new Uint8Array([
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18,
+      ]);
+      expect(testData.length).toBeGreaterThan(8);
+
+      // Record initial state before write around the target range
+      const preBefore = displayDevice.framebuffer.readBytes(offset - 4, 4);
+      const preAfter = displayDevice.framebuffer.readBytes(offset + testData.length, 4);
+
+      // 1. Write byte array larger than 8 bytes at valid framebuffer offset
+      instance.memory.writeBytes(fbBase + BigInt(offset), testData);
+
+      // 2. Verify that the actual framebuffer contains the exact written bytes
+      const actualFbBytes = displayDevice.framebuffer.readBytes(offset, testData.length);
+      expect(actualFbBytes).toEqual(testData);
+
+      // 3. Read the same range through the physical address space
+      const readBackBytes = instance.memory.readBytes(fbBase + BigInt(offset), testData.length);
+
+      // 4. Verify byte-for-byte equality with the original data
+      expect(readBackBytes).toEqual(testData);
+
+      // 5. Confirm that the operation does not alter bytes outside the requested range
+      const postBefore = displayDevice.framebuffer.readBytes(offset - 4, 4);
+      const postAfter = displayDevice.framebuffer.readBytes(offset + testData.length, 4);
+      expect(postBefore).toEqual(preBefore);
+      expect(postAfter).toEqual(preAfter);
+    });
+
+    it('10. validates bulk readBytes results and rejects short or oversized results without scalar fallback', () => {
+      const mem = new PhysicalAddressSpace();
+      const cpuContext = createCpuAccessContext(0);
+
+      const scalarInvocations: {offset: Size64; size: number}[] = [];
+      let bulkReadCallCount = 0;
+      let returnShort = false;
+      let returnOversized = false;
+      let returnNonUint8 = false;
+
+      mem.mapMMIO({
+        id: 'bulk_validation_aperture',
+        name: 'Bulk Validation Aperture',
+        baseAddress: 0x6000_0000n,
+        size: 0x1000n,
+        handler: {
+          read: (offset, size) => {
+            scalarInvocations.push({offset, size});
+            return 0n;
+          },
+          write: (_offset, _value, _size) => {
+            void _offset;
+            void _value;
+            void _size;
+          },
+          readBytes: (_offset, count) => {
+            void _offset;
+            bulkReadCallCount++;
+            if (returnShort) {
+              // Return fewer bytes than requested count (e.g. count - 4)
+              return new Uint8Array(count - 4);
+            }
+            if (returnOversized) {
+              // Return more bytes than requested count (e.g. count + 4)
+              return new Uint8Array(count + 4);
+            }
+            if (returnNonUint8) {
+              // Return non-Uint8Array
+              return [1, 2, 3] as unknown as Uint8Array;
+            }
+            return new Uint8Array(count);
+          },
+        },
+      });
+
+      // (a) Short result: requested 16 bytes, returned 12 bytes
+      bulkReadCallCount = 0;
+      scalarInvocations.length = 0;
+      returnShort = true;
+      returnOversized = false;
+      returnNonUint8 = false;
+      expect(() => {
+        mem.readBytes(0x6000_0010n, 16, cpuContext);
+      }).toThrow(/bulk readBytes returned invalid length: expected 16 bytes, got 12 bytes/i);
+      expect(bulkReadCallCount).toBe(1);
+      expect(scalarInvocations.length).toBe(0); // Zero scalar fallback
+
+      // (b) Oversized result: requested 16 bytes, returned 20 bytes
+      bulkReadCallCount = 0;
+      scalarInvocations.length = 0;
+      returnShort = false;
+      returnOversized = true;
+      returnNonUint8 = false;
+      expect(() => {
+        mem.readBytes(0x6000_0010n, 16, cpuContext);
+      }).toThrow(/bulk readBytes returned invalid length: expected 16 bytes, got 20 bytes/i);
+      expect(bulkReadCallCount).toBe(1);
+      expect(scalarInvocations.length).toBe(0); // Zero scalar fallback
+
+      // (c) Non-Uint8Array result
+      bulkReadCallCount = 0;
+      scalarInvocations.length = 0;
+      returnShort = false;
+      returnOversized = false;
+      returnNonUint8 = true;
+      expect(() => {
+        mem.readBytes(0x6000_0010n, 16, cpuContext);
+      }).toThrow(/bulk readBytes returned invalid type: expected Uint8Array/i);
+      expect(bulkReadCallCount).toBe(1);
+      expect(scalarInvocations.length).toBe(0); // Zero scalar fallback
+    });
   });
 });

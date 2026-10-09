@@ -1,4 +1,5 @@
 import {IDevice} from '../device/types';
+import {Address64} from '../types';
 
 export const DISPLAY_WIDTH = 1080;
 export const DISPLAY_HEIGHT = 2424;
@@ -48,4 +49,6 @@ export interface IFabricDessertDisplayDevice extends IDevice {
   readonly framebuffer: IFramebuffer;
   readonly systemRenderer: ISystemRenderer;
   flush(): void;
+  getMmioBase(name: string): Address64;
+  getFramebufferApertureBase(): Address64;
 }

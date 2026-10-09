@@ -1,5 +1,5 @@
 import {DeviceClass, IDevice, IDeviceContext, MmioApertureRequest} from '../device/types';
-import {Size64} from '../types';
+import {Address64, Size64} from '../types';
 import {IMMIOHandler} from '../memory/address-space';
 import {Framebuffer} from './framebuffer';
 import {SystemRenderer} from './system-renderer';
@@ -159,6 +159,17 @@ export class FabricDessertDisplayDevice implements IFabricDessertDisplayDevice, 
   terminate(): void {
     this.systemRenderer.detachOutputBackend();
     this.deviceContext = null;
+  }
+
+  getMmioBase(name: string): Address64 {
+    if (!this.deviceContext) {
+      throw new Error(`Display device is not initialized`);
+    }
+    return this.deviceContext.getMmioBase(name);
+  }
+
+  getFramebufferApertureBase(): Address64 {
+    return this.getMmioBase('fb');
   }
 
   flush(): void {
