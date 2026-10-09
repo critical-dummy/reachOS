@@ -868,7 +868,7 @@ describe('Fabric Dessert Core Foundation', () => {
 
       // Core 0 writes MMIO register
       core0.writePhysical(mmioBase, new Uint8Array([0x11, 0x22, 0x33, 0x44]));
-      expect(writeCount).toBe(4); // writeBytes dispatches bytes
+      expect(writeCount).toBe(1); // single 4-byte scalar MMIO transaction preserved
       expect(lastWriteContext).toBeDefined();
       expect(lastWriteContext?.initiatorType).toBe(AccessInitiatorType.CPU);
       if (lastWriteContext?.initiatorType === AccessInitiatorType.CPU) {
@@ -1241,6 +1241,165 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(records[0]?.op).toBe('readBytes');
       expect(records[0]?.context).toEqual(cpu1Context);
       expect(records.every((r) => r.context === cpu1Context)).toBe(true);
+    });
+
+    it('6. preserves scalar MMIO transaction boundaries for 1 to 8 byte reads and writes', () => {
+      interface MmioInvocation {
+        type: 'read' | 'write';
+        offset: Size64;
+        value?: bigint;
+        sizeBytes: number;
+        context?: PhysicalAccessContext;
+      }
+      const invocations: MmioInvocation[] = [];
+
+      const mem = new PhysicalAddressSpace();
+      mem.mapMMIO({
+        id: 'test_aperture',
+        name: 'Test Aperture',
+        baseAddress: 0x4000_0000n,
+        size: 0x1000n,
+        handler: {
+          read: (offset, sizeBytes, context) => {
+            invocations.push({type: 'read', offset, sizeBytes, context});
+            if (offset === 0x10n && sizeBytes === 4) {
+              return 0x44332211n;
+            }
+            if (offset === 0x20n && sizeBytes === 8) {
+              return 0x8877665544332211n;
+            }
+            if (offset === 0x30n && sizeBytes === 2) {
+              return 0x1234n;
+            }
+            return 0xabn;
+          },
+          write: (offset, value, sizeBytes, context) => {
+            invocations.push({type: 'write', offset, value, sizeBytes, context});
+          },
+        },
+      });
+
+      const cpuContext = createCpuAccessContext(2);
+
+      // (a) readBytes(..., 4): exactly 1 scalar read of size 4
+      invocations.length = 0;
+      const read4 = mem.readBytes(0x4000_0010n, 4, cpuContext);
+      expect(invocations.length).toBe(1);
+      expect(invocations[0]).toEqual({
+        type: 'read',
+        offset: 0x10n,
+        sizeBytes: 4,
+        context: cpuContext,
+      });
+      expect(Array.from(read4)).toEqual([0x11, 0x22, 0x33, 0x44]);
+
+      // (b) readBytes(..., 8): exactly 1 scalar read of size 8
+      invocations.length = 0;
+      const read8 = mem.readBytes(0x4000_0020n, 8, cpuContext);
+      expect(invocations.length).toBe(1);
+      expect(invocations[0]).toEqual({
+        type: 'read',
+        offset: 0x20n,
+        sizeBytes: 8,
+        context: cpuContext,
+      });
+      expect(Array.from(read8)).toEqual([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+
+      // (c) readBytes(..., 2): exactly 1 scalar read of size 2
+      invocations.length = 0;
+      const read2 = mem.readBytes(0x4000_0030n, 2, cpuContext);
+      expect(invocations.length).toBe(1);
+      expect(invocations[0]).toEqual({
+        type: 'read',
+        offset: 0x30n,
+        sizeBytes: 2,
+        context: cpuContext,
+      });
+      expect(Array.from(read2)).toEqual([0x34, 0x12]);
+
+      // (d) writeBytes(..., 4): exactly 1 scalar write of size 4 with little-endian value
+      invocations.length = 0;
+      mem.writeBytes(0x4000_0010n, new Uint8Array([0x11, 0x22, 0x33, 0x44]), cpuContext);
+      expect(invocations.length).toBe(1);
+      expect(invocations[0]).toEqual({
+        type: 'write',
+        offset: 0x10n,
+        value: 0x44332211n,
+        sizeBytes: 4,
+        context: cpuContext,
+      });
+
+      // (e) writeBytes(..., 8): exactly 1 scalar write of size 8
+      invocations.length = 0;
+      mem.writeBytes(
+        0x4000_0020n,
+        new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
+        cpuContext
+      );
+      expect(invocations.length).toBe(1);
+      expect(invocations[0]).toEqual({
+        type: 'write',
+        offset: 0x20n,
+        value: 0x0807060504030201n,
+        sizeBytes: 8,
+        context: cpuContext,
+      });
+
+      // (f) writeBytes > 8 bytes (e.g. 10 bytes): falls back to byte-by-byte write8
+      invocations.length = 0;
+      const largeData = new Uint8Array(10);
+      largeData.fill(0x5a);
+      mem.writeBytes(0x4000_0000n, largeData, cpuContext);
+      expect(invocations.length).toBe(10);
+      expect(invocations.every((inv) => inv.type === 'write' && inv.sizeBytes === 1 && inv.value === 0x5an)).toBe(true);
+    });
+
+    it('7. ensures access contexts are frozen and validates factory parameters', () => {
+      // Valid contexts are frozen
+      const hostCtx = createHostAccessContext('host_test');
+      expect(Object.isFrozen(hostCtx)).toBe(true);
+      expect(() => {
+        // @ts-expect-error - mutation test on frozen object
+        hostCtx.description = 'mutated';
+      }).toThrow();
+
+      const defaultHostCtx = DEFAULT_HOST_ACCESS_CONTEXT;
+      expect(Object.isFrozen(defaultHostCtx)).toBe(true);
+      expect(() => {
+        // @ts-expect-error - mutation test on frozen object
+        defaultHostCtx.initiatorType = AccessInitiatorType.CPU;
+      }).toThrow();
+
+      const cpuCtx = createCpuAccessContext(1, 0);
+      expect(Object.isFrozen(cpuCtx)).toBe(true);
+      expect(() => {
+        // @ts-expect-error - mutation test on frozen object
+        cpuCtx.coreId = 99;
+      }).toThrow();
+
+      const devCtx = createDeviceAccessContext('dev_uart_0');
+      expect(Object.isFrozen(devCtx)).toBe(true);
+      expect(() => {
+        // @ts-expect-error - mutation test on frozen object
+        devCtx.deviceId = 'other';
+      }).toThrow();
+
+      // Factory parameter validation: invalid coreId rejected
+      expect(() => createCpuAccessContext(-1)).toThrow(/Invalid CPU coreId/i);
+      expect(() => createCpuAccessContext(NaN)).toThrow(/Invalid CPU coreId/i);
+      expect(() => createCpuAccessContext(1.5)).toThrow(/Invalid CPU coreId/i);
+      expect(() => createCpuAccessContext(0, -1)).toThrow(/Invalid CPU clusterId/i);
+      expect(() => createCpuAccessContext(0, NaN)).toThrow(/Invalid CPU clusterId/i);
+
+      // Invalid deviceId rejected
+      expect(() => createDeviceAccessContext('')).toThrow(/Invalid deviceId/i);
+      expect(() => createDeviceAccessContext('   ')).toThrow(/Invalid deviceId/i);
+      // @ts-expect-error - runtime validation test
+      expect(() => createDeviceAccessContext(null)).toThrow(/Invalid deviceId/i);
+
+      // Invalid host description rejected
+      expect(() => createHostAccessContext('')).toThrow(/Invalid host access context description/i);
+      expect(() => createHostAccessContext('   ')).toThrow(/Invalid host access context description/i);
     });
   });
 });

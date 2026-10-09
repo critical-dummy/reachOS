@@ -35,23 +35,35 @@ export const DEFAULT_HOST_ACCESS_CONTEXT: HostAccessContext = Object.freeze({
 });
 
 export function createHostAccessContext(description?: string): HostAccessContext {
-  return {
+  if (description !== undefined && (typeof description !== 'string' || description.trim().length === 0)) {
+    throw new Error(`Invalid host access context description: "${description}"`);
+  }
+  return Object.freeze({
     initiatorType: AccessInitiatorType.HOST,
     ...(description !== undefined ? {description} : {}),
-  };
+  });
 }
 
 export function createCpuAccessContext(coreId: number, clusterId?: number): CpuAccessContext {
-  return {
+  if (typeof coreId !== 'number' || !Number.isSafeInteger(coreId) || coreId < 0) {
+    throw new Error(`Invalid CPU coreId: ${coreId}`);
+  }
+  if (clusterId !== undefined && (typeof clusterId !== 'number' || !Number.isSafeInteger(clusterId) || clusterId < 0)) {
+    throw new Error(`Invalid CPU clusterId: ${clusterId}`);
+  }
+  return Object.freeze({
     initiatorType: AccessInitiatorType.CPU,
     coreId,
     ...(clusterId !== undefined ? {clusterId} : {}),
-  };
+  });
 }
 
 export function createDeviceAccessContext(deviceId: string): DeviceAccessContext {
-  return {
+  if (typeof deviceId !== 'string' || deviceId.trim().length === 0) {
+    throw new Error(`Invalid deviceId: "${deviceId}"`);
+  }
+  return Object.freeze({
     initiatorType: AccessInitiatorType.DEVICE,
     deviceId,
-  };
+  });
 }

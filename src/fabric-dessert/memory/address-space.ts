@@ -265,6 +265,15 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     if (region && address + BigInt(count) <= region.baseAddress + region.size) {
       return region.readBytes(address - region.baseAddress, count, context);
     }
+    const mmio = this.getMMIOAt(address);
+    if (mmio && address + BigInt(count) <= mmio.baseAddress + mmio.size && count >= 1 && count <= 8) {
+      const val = mmio.handler.read(address - mmio.baseAddress, count, context);
+      const result = new Uint8Array(count);
+      for (let i = 0; i < count; i++) {
+        result[i] = Number((val >> BigInt(i * 8)) & 0xffn);
+      }
+      return result;
+    }
     const result = new Uint8Array(count);
     for (let i = 0; i < count; i++) {
       result[i] = this.read8(address + BigInt(i), context);
@@ -277,6 +286,15 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     const region = this.getRegionAt(address);
     if (region && address + BigInt(data.length) <= region.baseAddress + region.size) {
       region.writeBytes(address - region.baseAddress, data, context);
+      return;
+    }
+    const mmio = this.getMMIOAt(address);
+    if (mmio && address + BigInt(data.length) <= mmio.baseAddress + mmio.size && data.length >= 1 && data.length <= 8) {
+      let val = 0n;
+      for (let i = 0; i < data.length; i++) {
+        val |= BigInt(data[i]) << BigInt(i * 8);
+      }
+      mmio.handler.write(address - mmio.baseAddress, val, data.length, context);
       return;
     }
     for (let i = 0; i < data.length; i++) {
