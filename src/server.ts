@@ -13,16 +13,27 @@ const app = express();
 const angularApp = new AngularNodeAppEngine();
 
 /**
- * Example Express Rest API endpoints can be defined here.
- * Uncomment and define endpoints as necessary.
- *
- * Example:
- * ```ts
- * app.get('/api/{*splat}', (req, res) => {
- *   // Handle API request
- * });
- * ```
+ * Configure cross-origin isolation headers required for WebAssembly
+ * multi-threading and SharedArrayBuffer memory models.
  */
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  next();
+});
+
+/**
+ * QEMU-WASM status & configuration proxy API endpoint.
+ */
+app.get('/api/qemu/status', (req, res) => {
+  res.json({
+    engine: 'qemu-system-aarch64',
+    arch: 'aarch64',
+    supportedMachines: ['raspi3ap', 'virt'],
+    status: 'ready',
+    crossOriginIsolated: true,
+  });
+});
 
 /**
  * Serve static files from /browser
@@ -57,7 +68,6 @@ if (isMainModule(import.meta.url) || process.env['pm_id']) {
     if (error) {
       throw error;
     }
-
     console.log(`Node Express server listening on http://localhost:${port}`);
   });
 }
