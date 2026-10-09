@@ -6,6 +6,7 @@ import {
   MAX_ADDRESS_64,
   Size64,
 } from '../types';
+import {createDeviceAccessContext} from '../memory/access-context';
 import {IPhysicalAddressSpace} from '../memory/address-space';
 import {DeviceRegistrationRecord, IDevice, IDeviceContext} from './types';
 
@@ -99,8 +100,10 @@ export class DeviceBus implements IDeviceBus {
       this.nextFreeMmioAddress = apertureEnd;
     }
 
+    const deviceAccessContext = createDeviceAccessContext(device.id);
     const context: IDeviceContext = {
       deviceId: device.id,
+      accessContext: deviceAccessContext,
       getMmioBase: (name: string) => {
         const base = mmioAllocations.get(name);
         if (base === undefined) {
@@ -109,10 +112,10 @@ export class DeviceBus implements IDeviceBus {
         return base;
       },
       readPhysical: (address: Address64, count: number) => {
-        return this.addressSpace.readBytes(address, count);
+        return this.addressSpace.readBytes(address, count, deviceAccessContext);
       },
       writePhysical: (address: Address64, data: Uint8Array) => {
-        this.addressSpace.writeBytes(address, data);
+        this.addressSpace.writeBytes(address, data, deviceAccessContext);
       },
       raiseInterrupt: (vector: number) => {
         this.dispatchInterrupt(vector, true);

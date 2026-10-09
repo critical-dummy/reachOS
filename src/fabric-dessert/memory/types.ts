@@ -1,5 +1,7 @@
 import {Address64, Size64} from '../types';
 
+export * from './access-context';
+
 export enum MemoryRegionType {
   RAM = 'RAM',
   ROM = 'ROM',

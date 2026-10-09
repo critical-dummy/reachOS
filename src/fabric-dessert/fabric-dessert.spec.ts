@@ -1,14 +1,20 @@
 import {describe, it, expect} from 'vitest';
 import {
+  AccessInitiatorType,
   assertValidAddress64,
   BootRom,
+  createCpuAccessContext,
+  createDeviceAccessContext,
   createFabricDessertInstance,
+  createHostAccessContext,
+  DEFAULT_HOST_ACCESS_CONTEXT,
   DeviceClass,
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
   isValidAddress64,
   MemoryRegionType,
+  PhysicalAccessContext,
   PhysicalAddressSpace,
   RuntimeLifecycleState,
   SparsePhysicalMemoryRegion,
@@ -764,6 +770,333 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(() => mem.read32(0xffff_ffff_ffff_fffdn)).toThrow(/exceeds 64-bit physical address space limit/i);
       expect(() => mem.write32(0xffff_ffff_ffff_fffdn, 0)).toThrow(/exceeds 64-bit physical address space limit/i);
       expect(() => mem.fetchInstructionBytes(0xffff_ffff_ffff_fffdn, 4)).toThrow(/exceeds 64-bit physical address space limit/i);
+    });
+  });
+
+  describe('Initiator-Aware Physical Access Boundary', () => {
+    it('1. distinguishes between two different CPU cores accessing the same MMIO register', () => {
+      let lastReadContext: PhysicalAccessContext | undefined;
+      let lastWriteContext: PhysicalAccessContext | undefined;
+      let writeCount = 0;
+
+      const testMmioDevice: IDevice = {
+        id: 'cpu_reg_dev',
+        name: 'CPU Context Test Device',
+        deviceClass: DeviceClass.GENERIC,
+        irqCount: 0,
+        mmioRequests: [
+          {
+            name: 'per_cpu_ctrl',
+            size: 4096n,
+            handler: {
+              read: (_offset, _size, context) => {
+                void _offset;
+                void _size;
+                lastReadContext = context;
+                return 0xcafe0000n;
+              },
+              write: (_offset, _value, _size, context) => {
+                void _offset;
+                void _value;
+                void _size;
+                lastWriteContext = context;
+                writeCount++;
+              },
+            },
+          },
+        ],
+        initialize: (_ctx) => {
+          void _ctx;
+        },
+        reset: () => {
+          void 0;
+        },
+        terminate: () => {
+          void 0;
+        },
+      };
+
+      const instance = createFabricDessertInstance({
+        cpuTopology: {
+          coreCount: 4,
+          primaryCoreId: 0,
+          defaultFamily: Frt64ExecutionFamily.ARM_64,
+        },
+      });
+
+      const rec = instance.deviceBus.registerDevice(testMmioDevice);
+      const mmioBase = rec.mmioAllocations.get('per_cpu_ctrl');
+      expect(mmioBase).toBeDefined();
+      if (mmioBase === undefined) return;
+
+      const core0 = instance.cpu.getCore(0);
+      const core1 = instance.cpu.getCore(1);
+      expect(core0).toBeDefined();
+      expect(core1).toBeDefined();
+      if (!core0 || !core1) return;
+
+      expect(core0.accessContext).toEqual({
+        initiatorType: AccessInitiatorType.CPU,
+        coreId: 0,
+        clusterId: 0,
+      });
+      expect(core1.accessContext).toEqual({
+        initiatorType: AccessInitiatorType.CPU,
+        coreId: 1,
+        clusterId: 0,
+      });
+
+      // Core 0 reads MMIO register
+      const core0Read = core0.readPhysical(mmioBase, 4);
+      expect(core0Read.length).toBe(4);
+      expect(lastReadContext).toBeDefined();
+      expect(lastReadContext?.initiatorType).toBe(AccessInitiatorType.CPU);
+      if (lastReadContext?.initiatorType === AccessInitiatorType.CPU) {
+        expect(lastReadContext.coreId).toBe(0);
+      }
+
+      // Core 1 reads same MMIO register
+      const core1Read = core1.readPhysical(mmioBase, 4);
+      expect(core1Read.length).toBe(4);
+      expect(lastReadContext).toBeDefined();
+      expect(lastReadContext?.initiatorType).toBe(AccessInitiatorType.CPU);
+      if (lastReadContext?.initiatorType === AccessInitiatorType.CPU) {
+        expect(lastReadContext.coreId).toBe(1);
+      }
+
+      // Core 0 writes MMIO register
+      core0.writePhysical(mmioBase, new Uint8Array([0x11, 0x22, 0x33, 0x44]));
+      expect(writeCount).toBe(4); // writeBytes dispatches bytes
+      expect(lastWriteContext).toBeDefined();
+      expect(lastWriteContext?.initiatorType).toBe(AccessInitiatorType.CPU);
+      if (lastWriteContext?.initiatorType === AccessInitiatorType.CPU) {
+        expect(lastWriteContext.coreId).toBe(0);
+      }
+
+      // Core 1 writes MMIO register
+      core1.writePhysical(mmioBase, new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]));
+      expect(lastWriteContext).toBeDefined();
+      expect(lastWriteContext?.initiatorType).toBe(AccessInitiatorType.CPU);
+      if (lastWriteContext?.initiatorType === AccessInitiatorType.CPU) {
+        expect(lastWriteContext.coreId).toBe(1);
+      }
+
+      // Core 0 and Core 1 produce distinguishable contexts
+      expect(core0.accessContext.coreId).not.toBe(core1.accessContext.coreId);
+    });
+
+    it('2. identifies host-originated accesses with host initiator context', () => {
+      let lastReadContext: PhysicalAccessContext | undefined;
+      let lastWriteContext: PhysicalAccessContext | undefined;
+
+      const mem = new PhysicalAddressSpace();
+      mem.mapMMIO({
+        id: 'host_test_mmio',
+        name: 'Host Test MMIO',
+        baseAddress: 0x1000n,
+        size: 0x1000n,
+        handler: {
+          read: (_offset, _size, context) => {
+            void _offset;
+            void _size;
+            lastReadContext = context;
+            return 0x55n;
+          },
+          write: (_offset, _val, _size, context) => {
+            void _offset;
+            void _val;
+            void _size;
+            lastWriteContext = context;
+          },
+        },
+      });
+
+      // Default access from host/platform without explicit context
+      const val = mem.read32(0x1000n);
+      expect(val).toBe(0x55);
+      expect(lastReadContext).toBeDefined();
+      expect(lastReadContext).toEqual(DEFAULT_HOST_ACCESS_CONTEXT);
+
+      mem.write32(0x1000n, 0x99);
+      expect(lastWriteContext).toBeDefined();
+      expect(lastWriteContext).toEqual(DEFAULT_HOST_ACCESS_CONTEXT);
+
+      // Explicit host context with description
+      const customHostCtx = createHostAccessContext('host_firmware_probe');
+      mem.read8(0x1000n, customHostCtx);
+      expect(lastReadContext).toEqual(customHostCtx);
+    });
+
+    it('3. retains correct device identity for device-originated physical accesses', () => {
+      let targetMmioReadContext: PhysicalAccessContext | undefined;
+      let targetMmioWriteContext: PhysicalAccessContext | undefined;
+
+      let devContextA: IDeviceContext | undefined;
+      let devContextB: IDeviceContext | undefined;
+
+      const targetDevice: IDevice = {
+        id: 'target_sink_dev',
+        name: 'Target Sink Device',
+        deviceClass: DeviceClass.GENERIC,
+        irqCount: 0,
+        mmioRequests: [
+          {
+            name: 'sink_regs',
+            size: 4096n,
+            handler: {
+              read: (_offset, _size, context) => {
+                void _offset;
+                void _size;
+                targetMmioReadContext = context;
+                return 0x1234n;
+              },
+              write: (_offset, _val, _size, context) => {
+                void _offset;
+                void _val;
+                void _size;
+                targetMmioWriteContext = context;
+              },
+            },
+          },
+        ],
+        initialize: (_ctx) => {
+          void _ctx;
+        },
+        reset: () => {
+          void 0;
+        },
+        terminate: () => {
+          void 0;
+        },
+      };
+
+      const initiatorDeviceA: IDevice = {
+        id: 'dma_controller_0',
+        name: 'DMA Controller 0',
+        deviceClass: DeviceClass.GENERIC,
+        irqCount: 0,
+        mmioRequests: [],
+        initialize: (ctx) => {
+          devContextA = ctx;
+        },
+        reset: () => {
+          void 0;
+        },
+        terminate: () => {
+          void 0;
+        },
+      };
+
+      const initiatorDeviceB: IDevice = {
+        id: 'pcie_bridge_1',
+        name: 'PCIe Bridge 1',
+        deviceClass: DeviceClass.BUS_CONTROLLER,
+        irqCount: 0,
+        mmioRequests: [],
+        initialize: (ctx) => {
+          devContextB = ctx;
+        },
+        reset: () => {
+          void 0;
+        },
+        terminate: () => {
+          void 0;
+        },
+      };
+
+      const instance = createFabricDessertInstance();
+      const targetRec = instance.deviceBus.registerDevice(targetDevice);
+      instance.deviceBus.registerDevice(initiatorDeviceA);
+      instance.deviceBus.registerDevice(initiatorDeviceB);
+
+      const targetBase = targetRec.mmioAllocations.get('sink_regs');
+      expect(targetBase).toBeDefined();
+      expect(devContextA).toBeDefined();
+      expect(devContextB).toBeDefined();
+      if (!targetBase || !devContextA || !devContextB) return;
+
+      // Verify IDeviceContext has accessContext populated
+      expect(devContextA.accessContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'dma_controller_0',
+      });
+      expect(devContextB.accessContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'pcie_bridge_1',
+      });
+
+      // Device A reads from physical address space
+      const dataA = devContextA.readPhysical(targetBase, 4);
+      expect(dataA.length).toBe(4);
+      expect(targetMmioReadContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'dma_controller_0',
+      });
+
+      // Device B reads from physical address space
+      const dataB = devContextB.readPhysical(targetBase, 4);
+      expect(dataB.length).toBe(4);
+      expect(targetMmioReadContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'pcie_bridge_1',
+      });
+
+      // Device A writes to physical address space
+      devContextA.writePhysical(targetBase, new Uint8Array([1, 2, 3, 4]));
+      expect(targetMmioWriteContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'dma_controller_0',
+      });
+
+      // Device B writes to physical address space
+      devContextB.writePhysical(targetBase, new Uint8Array([5, 6, 7, 8]));
+      expect(targetMmioWriteContext).toEqual({
+        initiatorType: AccessInitiatorType.DEVICE,
+        deviceId: 'pcie_bridge_1',
+      });
+    });
+
+    it('4. guarantees access context propagation does not bypass physical address validation or region permissions', () => {
+      const instance = createFabricDessertInstance();
+      const core0 = instance.cpu.getCore(0);
+      expect(core0).toBeDefined();
+      if (!core0) return;
+
+      const mem = instance.memory;
+      const cpuCtx = createCpuAccessContext(0);
+      const devCtx = createDeviceAccessContext('malicious_dev');
+
+      // Negative address rejected regardless of context
+      expect(() => mem.read8(-1n, cpuCtx)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.read8(-1n, devCtx)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => core0.readPhysical(-1n, 4)).toThrow(/out of 64-bit physical address range/i);
+
+      // Address exceeding 64-bit space rejected
+      expect(() => mem.read8(0x1_0000_0000_0000_0000n, cpuCtx)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => mem.write8(0x1_0000_0000_0000_0000n, 0, devCtx)).toThrow(/out of 64-bit physical address range/i);
+      expect(() => core0.readPhysical(0x1_0000_0000_0000_0000n, 4)).toThrow(/out of 64-bit physical address range/i);
+
+      // Span extending beyond 0xFFFF_FFFF_FFFF_FFFFn rejected
+      expect(() => mem.read32(0xffff_ffff_ffff_fffdn, cpuCtx)).toThrow(/exceeds 64-bit physical address space limit/i);
+      expect(() => core0.readPhysical(0xffff_ffff_ffff_fffdn, 4)).toThrow(/exceeds 64-bit physical address space limit/i);
+
+      // Instruction fetch from non-executable region faults regardless of context
+      const bootBase = instance.board.bootContract.bootRomBase;
+      const nonExecRegion = new SparsePhysicalMemoryRegion(
+        'data_only',
+        'Data Only Region',
+        0x500000000n,
+        4096n,
+        MemoryRegionType.RAM,
+        {read: true, write: true, execute: false}
+      );
+      mem.mapRegion(nonExecRegion);
+
+      expect(() => mem.fetchInstructionBytes(0x500000000n, 4, cpuCtx)).toThrow(/execute permission/i);
+
+      // Write to read-only Boot ROM faults regardless of context
+      expect(() => mem.write32(bootBase, 0xdeadbeef, cpuCtx)).toThrow(/read-only/i);
+      expect(() => mem.write8(bootBase, 0xff, devCtx)).toThrow(/read-only/i);
     });
   });
 });

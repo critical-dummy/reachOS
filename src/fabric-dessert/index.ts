@@ -6,6 +6,7 @@
 export * from './types';
 export * from './arch/frt64/types';
 export * from './arch/frt64/boundary';
+export * from './memory/access-context';
 export * from './memory/types';
 export * from './memory/physical-memory';
 export * from './memory/address-space';

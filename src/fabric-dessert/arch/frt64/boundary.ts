@@ -8,11 +8,16 @@ import {
   InstructionFetchResult,
 } from './types';
 import {Address64, assertValidAddress64} from '../../types';
+import {
+  CpuAccessContext,
+  createCpuAccessContext,
+  PhysicalAccessContext,
+} from '../../memory/access-context';
 
 export interface IFrt64BusMaster {
-  readPhysical(address: Address64, sizeBytes: number): Uint8Array;
-  writePhysical(address: Address64, data: Uint8Array): void;
-  fetchInstructionPhysical(address: Address64, sizeBytes: number): Uint8Array;
+  readPhysical(address: Address64, sizeBytes: number, context?: PhysicalAccessContext): Uint8Array;
+  writePhysical(address: Address64, data: Uint8Array, context?: PhysicalAccessContext): void;
+  fetchInstructionPhysical(address: Address64, sizeBytes: number, context?: PhysicalAccessContext): Uint8Array;
 }
 
 export interface IFrt64CoreBoundary {
@@ -21,6 +26,7 @@ export interface IFrt64CoreBoundary {
   readonly isPrimary: boolean;
   readonly pc: Address64;
   readonly resetVector: Address64;
+  readonly accessContext: CpuAccessContext;
   getStatus(): Frt64CoreStatus;
   getActiveFamily(): Frt64ExecutionFamily;
   switchExecutionFamily(targetFamily: Frt64ExecutionFamily): boolean;
@@ -34,6 +40,8 @@ export interface IFrt64CoreBoundary {
   park(): void;
   unpark(entryVector?: Address64): boolean;
   signalInterrupt(irqVector: number): void;
+  readPhysical(address: Address64, sizeBytes: number): Uint8Array;
+  writePhysical(address: Address64, data: Uint8Array): void;
   fetchInstructionBytes(sizeBytes: number): InstructionFetchResult;
   step(): ExecutionStepResult;
 }
@@ -62,6 +70,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   readonly coreId: number;
   readonly clusterId: number;
   readonly isPrimary: boolean;
+  readonly accessContext: CpuAccessContext;
   private runState: Frt64CoreRunState;
   private activeFamily: Frt64ExecutionFamily;
   private cyclesExecuted = 0n;
@@ -73,6 +82,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     this.coreId = config.coreId;
     this.clusterId = config.clusterId ?? 0;
     this.isPrimary = config.isPrimary ?? (config.coreId === 0);
+    this.accessContext = createCpuAccessContext(this.coreId, this.clusterId);
     this.activeFamily = config.initialFamily;
     const initialReset = config.resetVector ?? 0n;
     assertValidAddress64(initialReset, 'core resetVector');
@@ -180,6 +190,20 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     void _irqVector;
   }
 
+  readPhysical(address: Address64, sizeBytes: number): Uint8Array {
+    if (!this.busMaster) {
+      throw new Error(`NO_BUS_MASTER_ATTACHED: core ${this.coreId}`);
+    }
+    return this.busMaster.readPhysical(address, sizeBytes, this.accessContext);
+  }
+
+  writePhysical(address: Address64, data: Uint8Array): void {
+    if (!this.busMaster) {
+      throw new Error(`NO_BUS_MASTER_ATTACHED: core ${this.coreId}`);
+    }
+    this.busMaster.writePhysical(address, data, this.accessContext);
+  }
+
   fetchInstructionBytes(sizeBytes: number): InstructionFetchResult {
     if (sizeBytes <= 0) {
       return {
@@ -200,7 +224,11 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     }
 
     try {
-      const bytes = this.busMaster.fetchInstructionPhysical(this.currentPc, sizeBytes);
+      const bytes = this.busMaster.fetchInstructionPhysical(
+        this.currentPc,
+        sizeBytes,
+        this.accessContext
+      );
       return {
         success: true,
         address: this.currentPc,

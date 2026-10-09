@@ -2,6 +2,7 @@ import {FabricDessertBoardConfig, FabricDessertBootContract} from './types';
 import {BootRom, IBootRom} from './boot-rom';
 import {Frt64CpuBoundary, IFrt64BusMaster, IFrt64CpuBoundary} from '../arch/frt64/boundary';
 import {IPhysicalAddressSpace, PhysicalAddressSpace} from '../memory/address-space';
+import {PhysicalAccessContext} from '../memory/access-context';
 import {SparsePhysicalMemoryRegion} from '../memory/physical-memory';
 import {MemoryRegionType} from '../memory/types';
 import {DeviceBus, IDeviceBus} from '../device/bus';
@@ -93,14 +94,14 @@ export class FabricDessertBoard implements IFabricDessertBoard {
 
     // 7. Connect CPU Boundary as bus master to physical address space
     const busMaster: IFrt64BusMaster = {
-      readPhysical: (addr: Address64, size: number) => {
-        return this.addressSpace.readBytes(addr, size);
+      readPhysical: (addr: Address64, size: number, context?: PhysicalAccessContext) => {
+        return this.addressSpace.readBytes(addr, size, context);
       },
-      writePhysical: (addr: Address64, data: Uint8Array) => {
-        this.addressSpace.writeBytes(addr, data);
+      writePhysical: (addr: Address64, data: Uint8Array, context?: PhysicalAccessContext) => {
+        this.addressSpace.writeBytes(addr, data, context);
       },
-      fetchInstructionPhysical: (addr: Address64, size: number) => {
-        return this.addressSpace.fetchInstructionBytes(addr, size);
+      fetchInstructionPhysical: (addr: Address64, size: number, context?: PhysicalAccessContext) => {
+        return this.addressSpace.fetchInstructionBytes(addr, size, context);
       },
     };
     this.cpuBoundary.attachBusMaster(busMaster);

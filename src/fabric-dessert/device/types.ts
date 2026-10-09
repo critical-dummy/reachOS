@@ -1,4 +1,5 @@
 import {Address64, Size64} from '../types';
+import {DeviceAccessContext} from '../memory/access-context';
 import {IMMIOHandler} from '../memory/address-space';
 
 export enum DeviceClass {
@@ -21,6 +22,7 @@ export interface MmioApertureRequest {
 
 export interface IDeviceContext {
   readonly deviceId: string;
+  readonly accessContext: DeviceAccessContext;
   getMmioBase(apertureName: string): Address64;
   readPhysical(address: Address64, sizeBytes: number): Uint8Array;
   writePhysical(address: Address64, data: Uint8Array): void;

@@ -6,12 +6,13 @@ import {
   MAX_ADDRESS_64,
   Size64,
 } from '../types';
+import {DEFAULT_HOST_ACCESS_CONTEXT, PhysicalAccessContext} from './access-context';
 import {IPhysicalMemoryRegion} from './physical-memory';
 import {IMemoryRegionDescriptor} from './types';
 
 export interface IMMIOHandler {
-  read(offset: Size64, sizeBytes: number): bigint;
-  write(offset: Size64, value: bigint, sizeBytes: number): void;
+  read(offset: Size64, sizeBytes: number, context?: PhysicalAccessContext): bigint;
+  write(offset: Size64, value: bigint, sizeBytes: number, context?: PhysicalAccessContext): void;
 }
 
 export interface IMMIORangeDescriptor {
@@ -32,25 +33,25 @@ export interface IPhysicalAddressSpace {
   listRegions(): readonly IMemoryRegionDescriptor[];
   listMMIORanges(): readonly IMMIORangeDescriptor[];
 
-  read8(address: Address64): number;
-  read16(address: Address64): number;
-  read32(address: Address64): number;
-  read64(address: Address64): bigint;
+  read8(address: Address64, context?: PhysicalAccessContext): number;
+  read16(address: Address64, context?: PhysicalAccessContext): number;
+  read32(address: Address64, context?: PhysicalAccessContext): number;
+  read64(address: Address64, context?: PhysicalAccessContext): bigint;
 
-  write8(address: Address64, value: number): void;
-  write16(address: Address64, value: number): void;
-  write32(address: Address64, value: number): void;
-  write64(address: Address64, value: bigint): void;
+  write8(address: Address64, value: number, context?: PhysicalAccessContext): void;
+  write16(address: Address64, value: number, context?: PhysicalAccessContext): void;
+  write32(address: Address64, value: number, context?: PhysicalAccessContext): void;
+  write64(address: Address64, value: bigint, context?: PhysicalAccessContext): void;
 
-  readBytes(address: Address64, count: number): Uint8Array;
-  writeBytes(address: Address64, data: Uint8Array): void;
+  readBytes(address: Address64, count: number, context?: PhysicalAccessContext): Uint8Array;
+  writeBytes(address: Address64, data: Uint8Array, context?: PhysicalAccessContext): void;
 
   /**
    * Pre-MMU physical instruction fetch operation.
    * Resolves the physical region, verifies execute permission, and returns raw instruction bytes.
    * Faults if the address is unmapped, within MMIO, or within a non-executable region.
    */
-  fetchInstructionBytes(address: Address64, count: number): Uint8Array;
+  fetchInstructionBytes(address: Address64, count: number, context?: PhysicalAccessContext): Uint8Array;
 }
 
 export class PhysicalAddressSpace implements IPhysicalAddressSpace {
@@ -146,7 +147,7 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
   }
 
-  read8(address: Address64): number {
+  read8(address: Address64, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): number {
     this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
@@ -154,12 +155,12 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      return Number(mmio.handler.read(address - mmio.baseAddress, 1) & 0xffn);
+      return Number(mmio.handler.read(address - mmio.baseAddress, 1, context) & 0xffn);
     }
     throw new Error(`Unmapped physical memory read8 at ${formatAddress(address)}`);
   }
 
-  read16(address: Address64): number {
+  read16(address: Address64, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): number {
     this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
@@ -167,12 +168,12 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      return Number(mmio.handler.read(address - mmio.baseAddress, 2) & 0xffffn);
+      return Number(mmio.handler.read(address - mmio.baseAddress, 2, context) & 0xffffn);
     }
     throw new Error(`Unmapped physical memory read16 at ${formatAddress(address)}`);
   }
 
-  read32(address: Address64): number {
+  read32(address: Address64, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): number {
     this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
@@ -180,12 +181,12 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      return Number(mmio.handler.read(address - mmio.baseAddress, 4) & 0xffffffffn);
+      return Number(mmio.handler.read(address - mmio.baseAddress, 4, context) & 0xffffffffn);
     }
     throw new Error(`Unmapped physical memory read32 at ${formatAddress(address)}`);
   }
 
-  read64(address: Address64): bigint {
+  read64(address: Address64, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): bigint {
     this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
@@ -193,12 +194,12 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      return mmio.handler.read(address - mmio.baseAddress, 8);
+      return mmio.handler.read(address - mmio.baseAddress, 8, context);
     }
     throw new Error(`Unmapped physical memory read64 at ${formatAddress(address)}`);
   }
 
-  write8(address: Address64, value: number): void {
+  write8(address: Address64, value: number, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): void {
     this.checkAccessRange(address, 1);
     const region = this.getRegionAt(address);
     if (region) {
@@ -207,13 +208,13 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      mmio.handler.write(address - mmio.baseAddress, BigInt(value & 0xff), 1);
+      mmio.handler.write(address - mmio.baseAddress, BigInt(value & 0xff), 1, context);
       return;
     }
     throw new Error(`Unmapped physical memory write8 at ${formatAddress(address)}`);
   }
 
-  write16(address: Address64, value: number): void {
+  write16(address: Address64, value: number, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): void {
     this.checkAccessRange(address, 2);
     const region = this.getRegionAt(address);
     if (region) {
@@ -222,13 +223,13 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      mmio.handler.write(address - mmio.baseAddress, BigInt(value & 0xffff), 2);
+      mmio.handler.write(address - mmio.baseAddress, BigInt(value & 0xffff), 2, context);
       return;
     }
     throw new Error(`Unmapped physical memory write16 at ${formatAddress(address)}`);
   }
 
-  write32(address: Address64, value: number): void {
+  write32(address: Address64, value: number, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): void {
     this.checkAccessRange(address, 4);
     const region = this.getRegionAt(address);
     if (region) {
@@ -237,13 +238,13 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      mmio.handler.write(address - mmio.baseAddress, BigInt(value >>> 0), 4);
+      mmio.handler.write(address - mmio.baseAddress, BigInt(value >>> 0), 4, context);
       return;
     }
     throw new Error(`Unmapped physical memory write32 at ${formatAddress(address)}`);
   }
 
-  write64(address: Address64, value: bigint): void {
+  write64(address: Address64, value: bigint, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): void {
     this.checkAccessRange(address, 8);
     const region = this.getRegionAt(address);
     if (region) {
@@ -252,13 +253,13 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const mmio = this.getMMIOAt(address);
     if (mmio) {
-      mmio.handler.write(address - mmio.baseAddress, value, 8);
+      mmio.handler.write(address - mmio.baseAddress, value, 8, context);
       return;
     }
     throw new Error(`Unmapped physical memory write64 at ${formatAddress(address)}`);
   }
 
-  readBytes(address: Address64, count: number): Uint8Array {
+  readBytes(address: Address64, count: number, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): Uint8Array {
     this.checkAccessRange(address, count);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(count) <= region.baseAddress + region.size) {
@@ -266,12 +267,12 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
     }
     const result = new Uint8Array(count);
     for (let i = 0; i < count; i++) {
-      result[i] = this.read8(address + BigInt(i));
+      result[i] = this.read8(address + BigInt(i), context);
     }
     return result;
   }
 
-  writeBytes(address: Address64, data: Uint8Array): void {
+  writeBytes(address: Address64, data: Uint8Array, context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): void {
     this.checkAccessRange(address, data.length);
     const region = this.getRegionAt(address);
     if (region && address + BigInt(data.length) <= region.baseAddress + region.size) {
@@ -279,12 +280,13 @@ export class PhysicalAddressSpace implements IPhysicalAddressSpace {
       return;
     }
     for (let i = 0; i < data.length; i++) {
-      this.write8(address + BigInt(i), data[i]);
+      this.write8(address + BigInt(i), data[i], context);
     }
   }
 
-  fetchInstructionBytes(address: Address64, count: number): Uint8Array {
+  fetchInstructionBytes(address: Address64, count: number, _context: PhysicalAccessContext = DEFAULT_HOST_ACCESS_CONTEXT): Uint8Array {
     this.checkAccessRange(address, count);
+    void _context;
 
     const region = this.getRegionAt(address);
     if (!region) {
