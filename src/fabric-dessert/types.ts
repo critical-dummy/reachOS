@@ -56,7 +56,7 @@ export function toAddress64(val: number | bigint | string): Address64 {
       throw new Error(`Invalid address string format: "${val}"`);
     }
   } else if (typeof val === 'number') {
-    if (!Number.isFinite(val) || Math.floor(val) !== val) {
+    if (!Number.isSafeInteger(val)) {
       throw new Error(`Invalid address number value: ${val}`);
     }
     addr = BigInt(val);

@@ -643,6 +643,34 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(isValidAddress64(0xffff_ffff_ffff_ffffn)).toBe(true);
       expect(isValidAddress64(0x8000_0000_0000_0000n)).toBe(true);
 
+      // Safe integer number input is accepted
+      expect(toAddress64(Number.MAX_SAFE_INTEGER)).toBe(
+        BigInt(Number.MAX_SAFE_INTEGER)
+      );
+
+      // Unsafe integer number inputs are rejected immediately with invalid address number value
+      expect(() => toAddress64(Number.MAX_SAFE_INTEGER + 1)).toThrow(
+        /invalid address number value/i
+      );
+      expect(() => toAddress64(Number.MAX_SAFE_INTEGER + 2)).toThrow(
+        /invalid address number value/i
+      );
+
+      // Verify Number precision restriction does not infringe upon string or bigint exact precision
+      expect(toAddress64(BigInt(Number.MAX_SAFE_INTEGER) + 1n)).toBe(
+        BigInt(Number.MAX_SAFE_INTEGER) + 1n
+      );
+      expect(toAddress64(String(BigInt(Number.MAX_SAFE_INTEGER) + 1n))).toBe(
+        BigInt(Number.MAX_SAFE_INTEGER) + 1n
+      );
+      expect(toAddress64(0x10_0000_0000_0000n)).toBe(0x10_0000_0000_0000n);
+      expect(toAddress64('0x10000000000000')).toBe(0x10_0000_0000_0000n);
+
+      // Non-integer numbers (floats, NaN, Infinity) are rejected
+      expect(() => toAddress64(1.5)).toThrow(/invalid address number value/i);
+      expect(() => toAddress64(NaN)).toThrow(/invalid address number value/i);
+      expect(() => toAddress64(Infinity)).toThrow(/invalid address number value/i);
+
       // Invalid negative addresses rejected
       expect(() => toAddress64(-1)).toThrow(/out of 64-bit physical address range/i);
       expect(() => toAddress64(-1n)).toThrow(/out of 64-bit physical address range/i);
