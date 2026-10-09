@@ -1345,13 +1345,20 @@ describe('Fabric Dessert Core Foundation', () => {
         context: cpuContext,
       });
 
-      // (f) writeBytes > 8 bytes (e.g. 10 bytes): falls back to byte-by-byte write8
+      // (f) writeBytes > 8 bytes (e.g. 10 bytes) without handler.writeBytes: rejects explicitly without scalar fallback
       invocations.length = 0;
       const largeData = new Uint8Array(10);
       largeData.fill(0x5a);
-      mem.writeBytes(0x4000_0000n, largeData, cpuContext);
-      expect(invocations.length).toBe(10);
-      expect(invocations.every((inv) => inv.type === 'write' && inv.sizeBytes === 1 && inv.value === 0x5an)).toBe(true);
+      expect(() => {
+        mem.writeBytes(0x4000_0000n, largeData, cpuContext);
+      }).toThrow(/does not implement bulk writeBytes/i);
+      expect(invocations.length).toBe(0); // No scalar handler calls made
+
+      // (g) readBytes > 8 bytes without handler.readBytes: rejects explicitly without scalar fallback
+      expect(() => {
+        mem.readBytes(0x4000_0000n, 12, cpuContext);
+      }).toThrow(/does not implement bulk readBytes/i);
+      expect(invocations.length).toBe(0); // No scalar handler calls made
     });
 
     it('7. ensures access contexts are frozen and validates factory parameters', () => {
@@ -1400,6 +1407,173 @@ describe('Fabric Dessert Core Foundation', () => {
       // Invalid host description rejected
       expect(() => createHostAccessContext('')).toThrow(/Invalid host access context description/i);
       expect(() => createHostAccessContext('   ')).toThrow(/Invalid host access context description/i);
+    });
+
+    it('8. supports bulk MMIO handler operations and rejects requests crossing aperture boundaries', () => {
+      interface BulkInvocation {
+        op: 'read' | 'write' | 'readBytes' | 'writeBytes';
+        offset: Size64;
+        countOrSize?: number;
+        data?: Uint8Array;
+        context?: PhysicalAccessContext;
+      }
+      const bulkInvocations: BulkInvocation[] = [];
+
+      const mem = new PhysicalAddressSpace();
+      mem.mapMMIO({
+        id: 'bulk_aperture',
+        name: 'Bulk Aperture',
+        baseAddress: 0x5000_0000n,
+        size: 0x100n, // 256 bytes: 0x5000_0000n to 0x5000_0100n
+        handler: {
+          read: (offset, sizeBytes, context) => {
+            bulkInvocations.push({op: 'read', offset, countOrSize: sizeBytes, context});
+            return 0x11223344n;
+          },
+          write: (offset, value, sizeBytes, context) => {
+            bulkInvocations.push({op: 'write', offset, countOrSize: sizeBytes, context});
+          },
+          readBytes: (offset, count, context) => {
+            bulkInvocations.push({op: 'readBytes', offset, countOrSize: count, context});
+            const buf = new Uint8Array(count);
+            buf.fill(0xee);
+            return buf;
+          },
+          writeBytes: (offset, data, context) => {
+            bulkInvocations.push({op: 'writeBytes', offset, data: new Uint8Array(data), context});
+          },
+        },
+      });
+
+      const devContext = createDeviceAccessContext('dma_controller');
+
+      // (1) Bulk read > 8 bytes invokes handler.readBytes exactly once with context and length
+      bulkInvocations.length = 0;
+      const bulkReadResult = mem.readBytes(0x5000_0010n, 32, devContext);
+      expect(bulkInvocations.length).toBe(1);
+      expect(bulkInvocations[0]).toEqual({
+        op: 'readBytes',
+        offset: 0x10n,
+        countOrSize: 32,
+        context: devContext,
+      });
+      expect(bulkReadResult.length).toBe(32);
+      expect(bulkReadResult[0]).toBe(0xee);
+
+      // (2) Bulk write > 8 bytes invokes handler.writeBytes exactly once with context and data
+      bulkInvocations.length = 0;
+      const bulkPayload = new Uint8Array(16);
+      bulkPayload.fill(0x77);
+      mem.writeBytes(0x5000_0020n, bulkPayload, devContext);
+      expect(bulkInvocations.length).toBe(1);
+      expect(bulkInvocations[0].op).toBe('writeBytes');
+      expect(bulkInvocations[0].offset).toBe(0x20n);
+      expect(bulkInvocations[0].data).toEqual(bulkPayload);
+      expect(bulkInvocations[0].context).toEqual(devContext);
+
+      // (3) Scalar operations within aperture invoke scalar handler once
+      bulkInvocations.length = 0;
+      mem.read32(0x5000_0000n, devContext);
+      expect(bulkInvocations.length).toBe(1);
+      expect(bulkInvocations[0].op).toBe('read');
+      expect(bulkInvocations[0].countOrSize).toBe(4);
+
+      // (4) Boundary rejection: access starts inside aperture and extends beyond it
+      // Aperture range is [0x5000_0000n, 0x5000_0100n)
+      bulkInvocations.length = 0;
+      expect(() => {
+        // read16 at last byte 0x5000_00FFn (span extends to 0x5000_0101n)
+        mem.read16(0x5000_00ffn, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // read32 at 0x5000_00FEn (span extends to 0x5000_0102n)
+        mem.read32(0x5000_00fen, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // read64 at 0x5000_00FCn (span extends to 0x5000_0104n)
+        mem.read64(0x5000_00fcn, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // write32 at 0x5000_00FEn
+        mem.write32(0x5000_00fen, 0x12345678, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // write64 at 0x5000_00FAn
+        mem.write64(0x5000_00fan, 0x1122334455667788n, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // readBytes(0x5000_00F0n, 32) extends to 0x5000_0110n
+        mem.readBytes(0x5000_00f0n, 32, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // writeBytes(0x5000_00F0n, 32 bytes) extends beyond aperture
+        mem.writeBytes(0x5000_00f0n, new Uint8Array(32), devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      // (5) Boundary rejection: access starts before aperture and continues into it
+      expect(() => {
+        // read16 starting 1 byte before aperture at 0x4FFF_FFFFn (span enters 0x5000_0000n)
+        mem.read16(0x4fff_ffffn, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // write32 starting 2 bytes before aperture at 0x4FFF_FFFEn
+        mem.write32(0x4fff_fffen, 0x12345678, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // readBytes starting 4 bytes before aperture and spanning into it
+        mem.readBytes(0x4fff_fffcn, 8, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        // writeBytes starting 4 bytes before aperture and spanning into it
+        mem.writeBytes(0x4fff_fffcn, new Uint8Array(8), devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      // (6) Boundary rejection: spanning across two adjacent apertures
+      mem.mapMMIO({
+        id: 'adjacent_aperture',
+        name: 'Adjacent Aperture',
+        baseAddress: 0x5000_0100n,
+        size: 0x100n,
+        handler: {
+          read: () => 0n,
+          write: (_offset, _val, _size) => {
+            void _offset;
+            void _val;
+            void _size;
+          },
+        },
+      });
+
+      expect(() => {
+        // Access from 0x5000_00FEn with count 4 crosses from bulk_aperture to adjacent_aperture
+        mem.read32(0x5000_00fen, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
+
+      expect(() => {
+        mem.readBytes(0x5000_00f8n, 16, devContext);
+      }).toThrow(/crosses MMIO aperture "Bulk Aperture" boundary/i);
+      expect(bulkInvocations.length).toBe(0);
     });
   });
 });

@@ -111,6 +111,20 @@ export class FabricDessertDisplayDevice implements IFabricDessertDisplayDevice, 
         }
         this.framebuffer.writeBytes(off, bytes);
       },
+      readBytes: (offset: Size64, count: number): Uint8Array => {
+        const off = Number(offset);
+        if (off < 0 || off + count > FRAMEBUFFER_SIZE_BYTES) {
+          return new Uint8Array(count);
+        }
+        return this.framebuffer.readBytes(off, count);
+      },
+      writeBytes: (offset: Size64, data: Uint8Array): void => {
+        const off = Number(offset);
+        if (off < 0 || off + data.length > FRAMEBUFFER_SIZE_BYTES) {
+          return;
+        }
+        this.framebuffer.writeBytes(off, data);
+      },
     };
 
     this.mmioRequests = [
