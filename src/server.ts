@@ -6,6 +6,7 @@ import {
 } from '@angular/ssr/node';
 import express from 'express';
 import {join} from 'node:path';
+import {getQemuStatus} from './server/qemu-status';
 
 const browserDistFolder = join(import.meta.dirname, '../browser');
 
@@ -23,16 +24,12 @@ app.use((req, res, next) => {
 });
 
 /**
- * QEMU-WASM status & configuration proxy API endpoint.
+ * QEMU-WASM status & runtime asset inspection API endpoint.
+ * Performs real filesystem checks against the runtime asset directory.
  */
-app.get('/api/qemu/status', (req, res) => {
-  res.json({
-    engine: 'qemu-system-aarch64',
-    arch: 'aarch64',
-    supportedMachines: ['raspi3ap', 'virt'],
-    status: 'ready',
-    crossOriginIsolated: true,
-  });
+app.get('/api/qemu/status', (_req, res) => {
+  const status = getQemuStatus();
+  res.json(status);
 });
 
 /**
