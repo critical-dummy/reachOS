@@ -182,6 +182,7 @@ describe('Phase 2: Browser Runtime Capability Detection', () => {
         },
         missingRequired: ['qemu-system-aarch64.wasm'],
         presentFiles: [],
+        assets: [],
         notes: 'Assets missing.',
       };
 

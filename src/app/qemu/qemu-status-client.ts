@@ -21,6 +21,17 @@ export interface QemuServerStatusResponse {
   readonly summary: QemuServerStatusSummary;
   readonly missingRequired: readonly string[];
   readonly presentFiles: readonly string[];
+  readonly assets: readonly {
+    readonly filename: string;
+    readonly expectedFilename: string;
+    readonly detectedFilename: string | null;
+    readonly description: string;
+    readonly category: 'runtime' | 'guest';
+    readonly required: boolean;
+    readonly upstreamStatus: 'confirmed' | 'provisional';
+    readonly exists: boolean;
+    readonly sizeBytes: number | null;
+  }[];
   readonly notes: string;
 }
 
