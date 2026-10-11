@@ -89,5 +89,16 @@ describe('App', () => {
     expect(stream[1].value).toBe('Backspace');
     expect(stream[2].value).toBe('한');
   });
+
+  it('should toggle diagnostic view non-destructively without altering canvas or host state', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+
+    expect(app['showDiagnostics']()).toBe(false);
+    app['toggleDiagnostics']();
+    expect(app['showDiagnostics']()).toBe(true);
+    app['toggleDiagnostics']();
+    expect(app['showDiagnostics']()).toBe(false);
+  });
 });
 
