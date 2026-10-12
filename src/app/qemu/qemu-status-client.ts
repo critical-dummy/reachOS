@@ -18,6 +18,8 @@ export interface QemuServerStatusResponse {
   readonly arch: string;
   readonly assetDirectory: string;
   readonly directoryExists: boolean;
+  readonly loaderPackageName?: string | null;
+  readonly loaderCompatible?: boolean;
   readonly summary: QemuServerStatusSummary;
   readonly missingRequired: readonly string[];
   readonly presentFiles: readonly string[];
