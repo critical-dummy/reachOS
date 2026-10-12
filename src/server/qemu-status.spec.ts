@@ -29,6 +29,8 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     expect(report.executionReady).toBe(false);
     expect(report.arch).toBe('aarch64');
     expect(report.directoryExists).toBe(true);
+    expect(report.loaderCompatible).toBe(false);
+    expect(report.loaderPackageName).toBeNull();
     expect(report.summary.presentRequiredCount).toBe(0);
     expect(report.summary.missingRequiredCount).toBe(report.summary.requiredCount);
     expect(report.presentFiles).toEqual([]);
@@ -53,6 +55,7 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     expect(report.directoryExists).toBe(false);
     expect(report.bootVerified).toBe(false);
     expect(report.executionReady).toBe(false);
+    expect(report.loaderCompatible).toBe(false);
     expect(report.summary.presentRequiredCount).toBe(0);
   });
 
@@ -112,31 +115,71 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     expect(dataAsset?.sizeBytes).toBeGreaterThan(0);
   });
 
-  it('5. demonstrates that a mismatched loader and data bundle CANNOT be reported as a fully present asset set', () => {
+  it('5. rejects unparseable loader when data file is present: must NOT result in assets_present_unverified', () => {
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.js'), 'binary content');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.wasm'), 'binary content');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.worker.js'), 'binary content');
-    // load.js was packaged expecting 'qemu-system-aarch64.data'
+    // load.js exists, but contains arbitrary non-Emscripten code without PACKAGE_NAME
     fs.writeFileSync(
       path.join(tempDir, 'load.js'),
-      "var PACKAGE_NAME = 'qemu-system-aarch64.data';"
+      'console.log("unparseable custom script without package metadata");'
     );
-    // But the file on disk was renamed or supplied as 'load.data' instead!
-    fs.writeFileSync(path.join(tempDir, 'load.data'), 'incompatible payload');
+    fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.data'), 'payload');
 
     const report = inspectQemuAssets(tempDir);
 
     // Must be rejected as incomplete, NOT present_unverified!
     expect(report.status).toBe('assets_incomplete');
-    expect(report.loaderPackageName).toBe('qemu-system-aarch64.data');
+    expect(report.loaderPackageName).toBeNull();
     expect(report.loaderCompatible).toBe(false);
-    expect(report.missingRequired).toContain('qemu-system-aarch64.data');
-    expect(report.presentFiles).not.toContain('qemu-system-aarch64.data');
-    expect(report.notes).toContain("Asset package mismatch: 'load.js' expects package 'qemu-system-aarch64.data'");
+    expect(report.bootVerified).toBe(false);
+    expect(report.executionReady).toBe(false);
+
+    // Must accurately report that the data file physically exists on disk without fabricating absence
+    const dataAsset = report.assets.find((a) => a.expectedFilename === 'qemu-system-aarch64.data');
+    expect(dataAsset).toBeDefined();
+    expect(dataAsset?.exists).toBe(true);
+    expect(dataAsset?.detectedFilename).toBe('qemu-system-aarch64.data');
+
+    expect(report.notes).toContain(
+      "Data loader 'load.js' exists but is unparseable; required package name could not be verified"
+    );
   });
 
-  it('6. accepts out.js as verified upstream alternative filename from examples/raspi3ap/src/htdocs', () => {
-    // Upstream demo copies qemu-system-aarch64.js to out.js
+  it('6. rejects mismatched loader and data bundle: must NOT result in assets_present_unverified', () => {
+    fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.js'), 'binary content');
+    fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.wasm'), 'binary content');
+    fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.worker.js'), 'binary content');
+    // load.js was packaged expecting 'other-bundle.data'
+    fs.writeFileSync(
+      path.join(tempDir, 'load.js'),
+      "var PACKAGE_NAME = 'other-bundle.data';"
+    );
+    // But the file on disk is qemu-system-aarch64.data
+    fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.data'), 'payload');
+
+    const report = inspectQemuAssets(tempDir);
+
+    // Must be rejected as incomplete!
+    expect(report.status).toBe('assets_incomplete');
+    expect(report.loaderPackageName).toBe('other-bundle.data');
+    expect(report.loaderCompatible).toBe(false);
+    expect(report.bootVerified).toBe(false);
+    expect(report.executionReady).toBe(false);
+
+    // Data file physically exists on disk and is reported as existing
+    const dataAsset = report.assets.find((a) => a.expectedFilename === 'qemu-system-aarch64.data');
+    expect(dataAsset).toBeDefined();
+    expect(dataAsset?.exists).toBe(true);
+    expect(dataAsset?.detectedFilename).toBe('qemu-system-aarch64.data');
+
+    expect(report.notes).toContain(
+      "Asset package mismatch: 'load.js' expects package 'other-bundle.data', but detected 'qemu-system-aarch64.data' on disk"
+    );
+  });
+
+  it('7. accepts out.js as verified upstream alternative filename from examples/raspi3ap/src/htdocs', () => {
+    // Upstream demo copies qemu-system-aarch64 to out.js
     fs.writeFileSync(path.join(tempDir, 'out.js'), 'upstream demo loader');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.wasm'), 'content');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.worker.js'), 'content');
@@ -162,7 +205,7 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     expect(jsAsset?.exists).toBe(true);
   });
 
-  it('7. truthfully reports missing data bundle when no data file exists', () => {
+  it('8. truthfully reports missing data bundle when no data file exists', () => {
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.js'), 'content');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.wasm'), 'content');
     fs.writeFileSync(path.join(tempDir, 'qemu-system-aarch64.worker.js'), 'content');
@@ -171,6 +214,7 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     const report = inspectQemuAssets(tempDir);
 
     expect(report.status).toBe('assets_incomplete');
+    expect(report.loaderCompatible).toBe(false);
     expect(report.missingRequired).toContain('qemu-system-aarch64.data');
 
     const dataAsset = report.assets.find((a) => a.expectedFilename === 'qemu-system-aarch64.data');
@@ -179,7 +223,7 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     expect(dataAsset?.detectedFilename).toBeNull();
   });
 
-  it('8. extractPackageNameFromLoader accurately extracts PACKAGE_NAME from Emscripten loader', () => {
+  it('9. extractPackageNameFromLoader accurately extracts PACKAGE_NAME and handles unparseable code', () => {
     const sample = `
       var Module = typeof Module !== 'undefined' ? Module : {};
       var PACKAGE_NAME = 'qemu-system-aarch64.data';
@@ -187,9 +231,10 @@ describe('QEMU-WASM Asset Inspector & Status Service', () => {
     `;
     expect(extractPackageNameFromLoader(sample)).toBe('qemu-system-aarch64.data');
     expect(extractPackageNameFromLoader('no package name here')).toBeNull();
+    expect(extractPackageNameFromLoader('')).toBeNull();
   });
 
-  it('9. resolves asset directory robustly with explicit override and fallbacks', () => {
+  it('10. resolves asset directory robustly with explicit override and fallbacks', () => {
     const override = resolveQemuAssetDirectory(tempDir);
     expect(override).toBe(tempDir);
 
