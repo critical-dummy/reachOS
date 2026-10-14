@@ -558,37 +558,109 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
       else if ((opcode & 0x1f000000) === 0x0a000000) {
         const sf = (opcode >> 31) & 1;
         const opc = (opcode >> 29) & 3;
+        const shift = (opcode >> 22) & 3;
         const n = (opcode >> 21) & 1;
         const rm = (opcode >> 16) & 0x1f;
+        const imm6 = (opcode >> 10) & 0x3f;
         const rn = (opcode >> 5) & 0x1f;
         const rd = opcode & 0x1f;
 
-        let valM = this.getX(rm);
-        if (n === 1) valM = ~valM;
-        const valN = this.getX(rn);
-        let res = 0n;
+        // Architectural validation: In 32-bit variant (sf == 0), imm6<5> must be 0 (shift in 0..31).
+        // If sf == 0 and imm6 >= 32, the encoding is unallocated / reserved.
+        if (sf === 0 && (imm6 & 0x20) !== 0) {
+          this.state = Frt64CoreRunState.FAULT;
+          return {
+            executed: false,
+            state: Frt64CoreRunState.FAULT,
+            reason: 'INVALID_INSTRUCTION',
+            fault: `Reserved imm6 shift amount (${imm6}) for 32-bit logical shifted register at ${formatAddress(currentPc)}`,
+            pc: this.pc,
+            opcode,
+            cyclesExecuted: this.cyclesExecuted,
+          };
+        }
 
-        if (opc === 0) res = valN & valM; // AND / BIC
-        else if (opc === 1) res = valN | valM; // ORR / ORN (e.g. MOV Rd, Rm when rn=31, n=0)
-        else if (opc === 2) res = valN ^ valM; // EOR / EON
-        else if (opc === 3) {
-          // ANDS / BICS / TST
-          res = this.setFlagsLogic(valN & valM, sf === 1);
-          if (rd === 31) {
-            disassembly = `tst ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+        const width = sf === 1 ? 64 : 32;
+        const mask = sf === 1 ? MASK_64 : MASK_32;
+        const amt = BigInt(imm6);
+
+        // Fetch operands ensuring 32-bit operations do not consume upper 32 bits of backing X registers
+        let valM = (rm === 31 ? 0n : this.getX(rm)) & mask;
+        const valN = (rn === 31 ? 0n : this.getX(rn)) & mask;
+
+        // Apply shift: 00 = LSL, 01 = LSR, 10 = ASR, 11 = ROR
+        if (shift === 0) {
+          // LSL
+          valM = (valM << amt) & mask;
+        } else if (shift === 1) {
+          // LSR
+          valM = (valM >> amt) & mask;
+        } else if (shift === 2) {
+          // ASR
+          valM = BigInt.asUintN(width, BigInt.asIntN(width, valM) >> amt);
+        } else {
+          // ROR
+          if (amt === 0n) {
+            valM = valM & mask;
           } else {
-            this.setX(rd, res, sf === 1);
-            disassembly = `ands ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+            valM = ((valM >> amt) | (valM << BigInt(width - imm6))) & mask;
           }
         }
 
-        if (opc !== 3) {
+        // Apply bitwise invert if N is set (BIC, ORN, EON, BICS)
+        if (n === 1) {
+          valM = (~valM) & mask;
+        }
+
+        let res = 0n;
+        if (opc === 0) {
+          // AND / BIC
+          res = valN & valM;
+        } else if (opc === 1) {
+          // ORR / ORN
+          res = valN | valM;
+        } else if (opc === 2) {
+          // EOR / EON
+          res = valN ^ valM;
+        } else if (opc === 3) {
+          // ANDS / BICS
+          res = this.setFlagsLogic(valN & valM, sf === 1);
+        }
+
+        // Write result to destination register (writes to XZR/WZR are discarded)
+        if (opc !== 3 || rd !== 31) {
           this.setX(rd, res, sf === 1);
-          if (opc === 1 && rn === 31 && n === 0) {
-            disassembly = `mov ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rm}`;
+        }
+
+        // Disassembly formatting
+        const regP = sf ? 'x' : 'w';
+        const shiftNames = ['lsl', 'lsr', 'asr', 'ror'];
+        const shiftStr = imm6 > 0 || shift > 0 ? `, ${shiftNames[shift]} #${imm6}` : '';
+
+        if (opc === 0) {
+          const mnemonic = n === 1 ? 'bic' : 'and';
+          disassembly = `${mnemonic} ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+        } else if (opc === 1) {
+          if (n === 0 && rn === 31 && shift === 0 && imm6 === 0) {
+            disassembly = `mov ${regP}${rd}, ${regP}${rm}`;
+          } else if (n === 1 && rn === 31 && shift === 0 && imm6 === 0) {
+            disassembly = `mvn ${regP}${rd}, ${regP}${rm}`;
           } else {
-            const names = ['and', 'orr', 'eor'];
-            disassembly = `${names[opc]} ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+            const mnemonic = n === 1 ? 'orn' : 'orr';
+            disassembly = `${mnemonic} ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+          }
+        } else if (opc === 2) {
+          const mnemonic = n === 1 ? 'eon' : 'eor';
+          disassembly = `${mnemonic} ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+        } else if (opc === 3) {
+          if (n === 0 && rd === 31) {
+            disassembly = `tst ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+          } else if (n === 1 && rd === 31) {
+            disassembly = `bics ${regP}zr, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+          } else if (n === 1) {
+            disassembly = `bics ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
+          } else {
+            disassembly = `ands ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
           }
         }
       }

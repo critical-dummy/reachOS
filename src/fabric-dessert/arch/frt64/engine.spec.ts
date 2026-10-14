@@ -192,6 +192,147 @@ describe('FRT64 Virtual CPU Execution Engine', () => {
       engine.step();
       expect(engine.getRegister('x4')).toBe(0b0110n);
     });
+
+    it('executes 64-bit logical shifted-register instructions (LSL, LSR, ASR, ROR, and EON)', () => {
+      // 1. and x2, x0, x1, lsl #4 (0x8a011002)
+      // x0 = 0x00000000_000000f0, x1 = 0x00000000_0000000f -> x1 lsl 4 = 0xf0 -> x2 = 0xf0
+      engine.setRegister('x0', 0x00000000000000f0n);
+      engine.setRegister('x1', 0x000000000000000fn);
+
+      // 2. orr x3, x0, x1, lsr #4 (0xaa411003)
+      // x0 = 0x1000, x1 = 0x0040 -> x1 lsr 4 = 4 -> x3 = 0x1004
+
+      // 3. eor x4, x0, x1, asr #2 (0xca810804)
+      // x0 = 0xffffffffffffffff, x1 = 0xfffffffffffffff0 (-16) -> asr 2 = -4 -> x4 = 3
+
+      // 4. eon x5, x0, x1, ror #8 (0xcae12005)
+      // x1 = 0x01234567_89abcdef -> ror 8 = 0xef012345_6789abcd
+      // x0 = ~0xef012345_6789abcd -> x0 ^ ~x1_ror = 0
+
+      const code = new Uint8Array([
+        0x02, 0x10, 0x01, 0x8a, // and x2, x0, x1, lsl #4
+        0x03, 0x10, 0x41, 0xaa, // orr x3, x0, x1, lsr #4
+        0x04, 0x08, 0x81, 0xca, // eor x4, x0, x1, asr #2
+        0x05, 0x20, 0xe1, 0xca, // eon x5, x0, x1, ror #8
+      ]);
+      busMaster.writePhysical(0x1000n, code);
+
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(engine.getRegister('x2')).toBe(0xf0n);
+
+      engine.setRegister('x0', 0x1000n);
+      engine.setRegister('x1', 0x0040n);
+      const step2 = engine.step();
+      expect(step2.executed).toBe(true);
+      expect(engine.getRegister('x3')).toBe(0x1004n);
+
+      engine.setRegister('x0', 0xffffffffffffffffn);
+      engine.setRegister('x1', 0xfffffffffffffff0n);
+      const step3 = engine.step();
+      expect(step3.executed).toBe(true);
+      expect(engine.getRegister('x4')).toBe(3n);
+
+      const rorVal = 0xef0123456789abcdn;
+      const mask64 = 0xffffffffffffffffn;
+      engine.setRegister('x0', (~rorVal) & mask64);
+      engine.setRegister('x1', 0x0123456789abcdefn);
+      const step4 = engine.step();
+      expect(step4.executed).toBe(true);
+      expect(engine.getRegister('x5')).toBe(0n);
+    });
+
+    it('executes 32-bit logical shifted-register instructions and isolates upper 32 bits', () => {
+      // Set X0 and X1 with nonzero high 32 bits to verify 32-bit operations ignore upper bits
+      engine.setRegister('x0', 0xdeadbeef000000ffn);
+      engine.setRegister('x1', 0xfeedface0000000fn);
+
+      // 1. bic w2, w0, w1, lsl #2 (0x0a210802: sf=0, opc=0, shift=0, n=1, rm=1, imm6=2, rn=0, rd=2)
+      // w0 = 0xff, w1 = 0x0f -> w1 lsl 2 = 0x3c -> w0 & ~0x3c = 0xc3
+      // X2 backing register must have upper 32 bits zeroed out
+
+      // 2. orn w3, w0, w1, lsr #3 (0x2a610c03: sf=0, opc=1, shift=1, n=1, rm=1, imm6=3, rn=0, rd=3)
+      // w0 = 0x1000, w1 = 0x80 -> w1 lsr 3 = 0x10 -> ~0x10 = 0xffffffef -> w3 = 0xffffffef
+
+      // 3. ands w4, w0, w1, asr #1 (0x6aa10404: sf=0, opc=3, shift=2, n=0, rm=1, imm6=1, rn=0, rd=4)
+      // w0 = 0xc0000000, w1 = 0x80000000 (with high 32 bits set in X1) -> w1 asr 1 = 0xc0000000 -> w4 = 0xc0000000, N=1, Z=0
+
+      // 4. bics w5, w0, w1, ror #4 (0x6ae11005: sf=0, opc=3, shift=3, n=1, rm=1, imm6=4, rn=0, rd=5)
+      // w1 = 0x12345678 -> ror 4 = 0x81234567 -> ~val = 0x7edcba98 -> if w0 = 0x7edcba98, res = 0x7edcba98, N=0, Z=0
+
+      const code = new Uint8Array([
+        0x02, 0x08, 0x21, 0x0a, // bic w2, w0, w1, lsl #2
+        0x03, 0x0c, 0x61, 0x2a, // orn w3, w0, w1, lsr #3
+        0x04, 0x04, 0x81, 0x6a, // ands w4, w0, w1, asr #1
+        0x05, 0x10, 0xe1, 0x6a, // bics w5, w0, w1, ror #4
+      ]);
+      busMaster.writePhysical(0x1000n, code);
+
+      // Step 1: BIC
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(engine.getRegister('x2')).toBe(0xc3n); // Upper 32 bits must be 0
+
+      // Step 2: ORN
+      engine.setRegister('x0', 0xbaadf00d00001000n);
+      engine.setRegister('x1', 0xcafebabe00000080n);
+      const step2 = engine.step();
+      expect(step2.executed).toBe(true);
+      expect(engine.getRegister('x3')).toBe(0xffffffefn); // Upper 32 bits zeroed
+
+      // Step 3: ANDS with 32-bit ASR sign-extension
+      engine.setRegister('x0', 0x11111111c0000000n);
+      engine.setRegister('x1', 0x2222222280000000n); // bit 31 is 1
+      const step3 = engine.step();
+      expect(step3.executed).toBe(true);
+      expect(engine.getRegister('x4')).toBe(0xc0000000n);
+      const flags3 = engine.getRegister('nzcv');
+      expect((flags3 & (1n << 31n)) !== 0n).toBe(true); // N flag set
+      expect((flags3 & (1n << 30n)) !== 0n).toBe(false); // Z flag clear
+
+      // Step 4: BICS with 32-bit ROR
+      engine.setRegister('x0', 0x7edcba98n);
+      engine.setRegister('x1', 0x12345678n);
+      const step4 = engine.step();
+      expect(step4.executed).toBe(true);
+      expect(engine.getRegister('x5')).toBe(0x7edcba98n);
+    });
+
+    it('executes TST (ANDS to XZR) with shifted register and updates condition flags', () => {
+      // tst x0, x1, lsl #8 (0xea01201f: sf=1, opc=3, shift=0, n=0, rm=1, imm6=8, rn=0, rd=31)
+      const code = new Uint8Array([
+        0x1f, 0x20, 0x01, 0xea, // tst x0, x1, lsl #8
+      ]);
+      busMaster.writePhysical(0x1000n, code);
+
+      // x0 = 0x0100, x1 = 0x0001 -> x1 lsl 8 = 0x0100 -> and != 0 -> Z=0
+      engine.setRegister('x0', 0x0100n);
+      engine.setRegister('x1', 0x0001n);
+      const res1 = engine.step();
+      expect(res1.executed).toBe(true);
+      let flags = engine.getRegister('nzcv');
+      expect((flags & (1n << 30n)) !== 0n).toBe(false); // Z is 0
+
+      // Reset PC and test zero result -> Z=1
+      engine.pc = 0x1000n;
+      engine.setRegister('x0', 0x0000n);
+      const res2 = engine.step();
+      expect(res2.executed).toBe(true);
+      flags = engine.getRegister('nzcv');
+      expect((flags & (1n << 30n)) !== 0n).toBe(true); // Z is 1
+    });
+
+    it('rejects reserved imm6 (>= 32) for 32-bit logical shifted-register as INVALID_INSTRUCTION', () => {
+      // 0x0a018002: sf=0, opc=0, shift=0, n=0, rm=1, imm6=32 (bit 5=1), rn=0, rd=2
+      const reservedCode = new Uint8Array([0x02, 0x80, 0x01, 0x0a]);
+      busMaster.writePhysical(0x1000n, reservedCode);
+
+      const res = engine.step();
+      expect(res.executed).toBe(false);
+      expect(res.reason).toBe('INVALID_INSTRUCTION');
+      expect(res.state).toBe(Frt64CoreRunState.FAULT);
+      expect(res.fault).toContain('Reserved imm6 shift amount');
+    });
   });
 
   describe('3. Memory & Bus Access Side Effects', () => {
