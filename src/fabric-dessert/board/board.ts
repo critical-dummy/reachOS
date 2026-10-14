@@ -1,6 +1,7 @@
 import {FabricDessertBoardConfig, FabricDessertBootContract} from './types';
 import {BootRom, IBootRom} from './boot-rom';
 import {Frt64CpuBoundary, IFrt64BusMaster, IFrt64CpuBoundary} from '../arch/frt64/boundary';
+import {createExecutionEngine} from '../arch/frt64/engine';
 import {IPhysicalAddressSpace, PhysicalAddressSpace} from '../memory/address-space';
 import {PhysicalAccessContext} from '../memory/access-context';
 import {SparsePhysicalMemoryRegion} from '../memory/physical-memory';
@@ -24,6 +25,7 @@ export interface IFabricDessertBoard {
   resume(): void;
   reset(): void;
   powerOff(): void;
+  attachExecutionEngine(family?: import('../arch/frt64/types').Frt64ExecutionFamily): void;
 }
 
 export class FabricDessertBoard implements IFabricDessertBoard {
@@ -33,6 +35,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
   readonly deviceBus: IDeviceBus;
   readonly displayDevice: IFabricDessertDisplayDevice;
   readonly bootRom: IBootRom;
+  private readonly busMaster: IFrt64BusMaster;
 
   constructor(config: FabricDessertBoardConfig) {
     this.config = config;
@@ -93,7 +96,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
     });
 
     // 7. Connect CPU Boundary as bus master to physical address space
-    const busMaster: IFrt64BusMaster = {
+    this.busMaster = {
       readPhysical: (addr: Address64, size: number, context?: PhysicalAccessContext) => {
         return this.addressSpace.readBytes(addr, size, context);
       },
@@ -104,7 +107,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
         return this.addressSpace.fetchInstructionBytes(addr, size, context);
       },
     };
-    this.cpuBoundary.attachBusMaster(busMaster);
+    this.cpuBoundary.attachBusMaster(this.busMaster);
 
     // 8. Connect DeviceBus interrupt routing to CPU boundary
     this.deviceBus.addInterruptListener((vector: number, level: boolean) => {
@@ -143,5 +146,21 @@ export class FabricDessertBoard implements IFabricDessertBoard {
   powerOff(): void {
     this.cpuBoundary.haltAll();
     this.deviceBus.terminateAllDevices();
+  }
+
+  attachExecutionEngine(family?: import('../arch/frt64/types').Frt64ExecutionFamily): void {
+    if (family) {
+      this.cpuBoundary.attachExecutionEngine((core) => {
+        return createExecutionEngine(
+          family,
+          core.coreId,
+          this.busMaster,
+          core.accessContext,
+          core.resetVector
+        );
+      });
+    } else {
+      this.cpuBoundary.attachExecutionEngine();
+    }
   }
 }

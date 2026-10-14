@@ -20,6 +20,7 @@ export class FabricDessertHost {
 
   constructor() {
     this.instance = createFabricDessertInstance();
+    this.instance.attachExecutionEngine();
     this.instance.onStateChange((_prev, next) => {
       this.state.set(next);
     });

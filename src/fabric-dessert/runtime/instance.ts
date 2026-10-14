@@ -8,11 +8,14 @@ import {IPhysicalAddressSpace} from '../memory/address-space';
 import {IDeviceBus} from '../device/bus';
 import {LifecycleStateChangeListener, RuntimeLifecycleState} from './lifecycle';
 
+import {IExecutionPump, ExecutionPump} from './execution-pump';
+
 export interface IFabricDessertInstance {
   readonly board: IFabricDessertBoard;
   readonly cpu: IFrt64CpuBoundary;
   readonly memory: IPhysicalAddressSpace;
   readonly deviceBus: IDeviceBus;
+  readonly executionPump: IExecutionPump;
 
   getState(): RuntimeLifecycleState;
   onStateChange(listener: LifecycleStateChangeListener): () => void;
@@ -23,15 +26,18 @@ export interface IFabricDessertInstance {
   resume(): void;
   stop(): void;
   reset(): void;
+  attachExecutionEngine(family?: import('../arch/frt64/types').Frt64ExecutionFamily): void;
 }
 
 export class FabricDessertInstance implements IFabricDessertInstance {
   readonly board: IFabricDessertBoard;
+  readonly executionPump: IExecutionPump;
   private state: RuntimeLifecycleState = RuntimeLifecycleState.UNINITIALIZED;
   private readonly stateListeners = new Set<LifecycleStateChangeListener>();
 
   constructor(config: FabricDessertBoardConfig) {
     this.board = new FabricDessertBoard(config);
+    this.executionPump = new ExecutionPump(this.board.cpuBoundary);
     this.transitionTo(RuntimeLifecycleState.CONFIGURED);
   }
 
@@ -45,6 +51,10 @@ export class FabricDessertInstance implements IFabricDessertInstance {
 
   get deviceBus(): IDeviceBus {
     return this.board.deviceBus;
+  }
+
+  attachExecutionEngine(family?: import('../arch/frt64/types').Frt64ExecutionFamily): void {
+    this.board.attachExecutionEngine(family);
   }
 
   getState(): RuntimeLifecycleState {
@@ -76,6 +86,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
         `Cannot initialize Fabric Dessert from state "${this.state}". Expected CONFIGURED or STOPPED.`
       );
     }
+    this.executionPump.reset();
     this.board.reset();
     this.transitionTo(RuntimeLifecycleState.READY);
   }
@@ -92,6 +103,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
     }
     // Startup policy: only the primary boot CPU enters the running boot path
     this.board.start();
+    this.executionPump.start();
     this.transitionTo(RuntimeLifecycleState.RUNNING);
   }
 
@@ -99,6 +111,7 @@ export class FabricDessertInstance implements IFabricDessertInstance {
     if (this.state !== RuntimeLifecycleState.RUNNING) {
       throw new Error(`Cannot pause Fabric Dessert when in state "${this.state}".`);
     }
+    this.executionPump.pause();
     this.board.pause();
     this.transitionTo(RuntimeLifecycleState.PAUSED);
   }
@@ -108,15 +121,18 @@ export class FabricDessertInstance implements IFabricDessertInstance {
       throw new Error(`Cannot resume Fabric Dessert when in state "${this.state}".`);
     }
     this.board.resume();
+    this.executionPump.resume();
     this.transitionTo(RuntimeLifecycleState.RUNNING);
   }
 
   stop(): void {
+    this.executionPump.stop();
     this.board.powerOff();
     this.transitionTo(RuntimeLifecycleState.STOPPED);
   }
 
   reset(): void {
+    this.executionPump.reset();
     this.board.reset();
     this.transitionTo(RuntimeLifecycleState.READY);
   }

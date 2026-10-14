@@ -37,6 +37,7 @@ export interface Frt64TopologyConfig {
   defaultFamily: Frt64ExecutionFamily;
   defaultResetVector?: Address64;
   primaryCoreId?: number;
+  autoAttachEngine?: boolean;
 }
 
 export interface Frt64CoreStatus {
@@ -47,6 +48,8 @@ export interface Frt64CoreStatus {
   cyclesExecuted: bigint;
   pc: Address64;
   resetVector: Address64;
+  hasEngine?: boolean;
+  architectureSnapshot?: Record<string, unknown>;
 }
 
 export interface InstructionFetchResult {
@@ -57,9 +60,28 @@ export interface InstructionFetchResult {
   fault?: string;
 }
 
+export type ExecutionStepReason =
+  | 'OK'
+  | 'NO_EXECUTION_ENGINE_ATTACHED'
+  | 'PARKED'
+  | 'HALTED'
+  | 'FAULT'
+  | 'UNSUPPORTED_EXECUTION_FAMILY'
+  | 'INVALID_INSTRUCTION'
+  | 'UNSUPPORTED_INSTRUCTION'
+  | 'MEMORY_FAULT'
+  | 'PAUSED'
+  | 'RESET';
+
 export interface ExecutionStepResult {
   executed: boolean;
   state: Frt64CoreRunState;
-  reason: 'NO_EXECUTION_ENGINE_ATTACHED' | 'PARKED' | 'HALTED' | 'FAULT';
+  reason: ExecutionStepReason;
+  cyclesExecuted?: bigint;
+  pc?: Address64;
+  opcode?: number;
+  fault?: string;
+  disassembly?: string;
 }
+
 

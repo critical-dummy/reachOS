@@ -1,4 +1,7 @@
 import {Address64} from '../../types';
+import {CpuAccessContext} from '../../memory/access-context';
+import {AArch64ExecutionEngine} from './aarch64-engine';
+import {IFrt64BusMaster} from './boundary';
 import {Frt64CoreRunState, Frt64ExecutionFamily} from './types';
 
 export type ExecutionStepReason =
@@ -149,3 +152,23 @@ export class UnsupportedExecutionEngine implements IFrt64ExecutionEngine {
     // No resources to release
   }
 }
+
+/**
+ * Factory creating an appropriate execution engine for the given architecture family.
+ *
+ * Automatically instantiates the genuine AArch64ExecutionEngine when family is ARM_64.
+ * Returns UnsupportedExecutionEngine for declared but unattached families (ARM_32, X86_32, X86_64).
+ */
+export function createExecutionEngine(
+  family: Frt64ExecutionFamily,
+  coreId: number,
+  busMaster: IFrt64BusMaster,
+  accessContext: CpuAccessContext,
+  initialResetVector: Address64 = 0n
+): IFrt64ExecutionEngine {
+  if (family === Frt64ExecutionFamily.ARM_64) {
+    return new AArch64ExecutionEngine(coreId, busMaster, accessContext, initialResetVector);
+  }
+  return new UnsupportedExecutionEngine(family, coreId, initialResetVector);
+}
+

@@ -6,6 +6,7 @@
 export * from './types';
 export * from './arch/frt64/types';
 export * from './arch/frt64/boundary';
+export * from './arch/frt64/engine';
 export * from './memory/access-context';
 export * from './memory/types';
 export * from './memory/physical-memory';
@@ -17,4 +18,5 @@ export * from './board/boot-rom';
 export * from './board/board';
 export * from './runtime/lifecycle';
 export * from './runtime/instance';
+export * from './runtime/execution-pump';
 export * from './display';
