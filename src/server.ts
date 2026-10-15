@@ -6,31 +6,11 @@ import {
 } from '@angular/ssr/node';
 import express from 'express';
 import {join} from 'node:path';
-import {getQemuStatus} from './server/qemu-status';
 
 const browserDistFolder = join(import.meta.dirname, '../browser');
 
 const app = express();
 const angularApp = new AngularNodeAppEngine();
-
-/**
- * Configure cross-origin isolation headers required for WebAssembly
- * multi-threading and SharedArrayBuffer memory models.
- */
-app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-  next();
-});
-
-/**
- * QEMU-WASM status & runtime asset inspection API endpoint.
- * Performs real filesystem checks against the runtime asset directory.
- */
-app.get('/api/qemu/status', (_req, res) => {
-  const status = getQemuStatus();
-  res.json(status);
-});
 
 /**
  * Serve static files from /browser
