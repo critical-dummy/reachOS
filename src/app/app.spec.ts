@@ -90,5 +90,17 @@ describe('App', () => {
     expect(stream[2].value).toBe('한');
   });
 
+  it('should reflect truthful host lifecycle state in stateLabel', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+
+    expect(app['stateLabel']()).toBe('READY');
+    host.start();
+    expect(app['stateLabel']()).toBe('RUNNING');
+    host.pause();
+    expect(app['stateLabel']()).toBe('PAUSED');
+    host.powerToggle();
+    expect(app['stateLabel']()).toBe('STOPPED');
+  });
 });
 

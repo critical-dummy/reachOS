@@ -1053,4 +1053,171 @@ describe('FRT64 Virtual CPU Execution Engine', () => {
       expect(resMem.state).toBe(Frt64CoreRunState.FAULT);
     });
   });
+
+  describe('11. AArch64 ISA Correctness and Encoding Validation (Arm DDI0602)', () => {
+    let engine: AArch64ExecutionEngine;
+
+    beforeEach(() => {
+      engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+    });
+
+    it('handles ADD/SUB immediate with LSL #12 shift and correctly isolates 32-bit WSP/SP', () => {
+      // 1. add x0, x1, #1, lsl #12 (0x91400420: sf=1, op=0, s=0, fixed=100010, sh=1, imm12=1, rn=1, rd=0)
+      // Adds 4096 (0x1000) to X1
+      engine.setRegister('x1', 10n);
+      const addLslCode = new Uint8Array([0x20, 0x04, 0x40, 0x91]);
+      busMaster.writePhysical(0x1000n, addLslCode);
+
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(engine.getRegister('x0')).toBe(4106n);
+
+      // 2. add wsp, wsp, #1 (0x110007ff: sf=0, op=0, s=0, sh=0, imm12=1, rn=31, rd=31)
+      // When SP has nonzero high 32 bits, 32-bit WSP operation must only use lower 32 bits and zero upper bits
+      engine.reset(0x1000n);
+      engine.setRegister('sp', 0xdeadbeef00000005n);
+      const addWspCode = new Uint8Array([0xff, 0x07, 0x00, 0x11]);
+      busMaster.writePhysical(0x1000n, addWspCode);
+
+      const step2 = engine.step();
+      expect(step2.executed).toBe(true);
+      expect(engine.getRegister('sp')).toBe(6n); // Upper 32 bits cleared to zero
+    });
+
+    it('rejects reserved shifts and immediate amounts in ADD/SUB shifted register', () => {
+      // 1. Reserved shift type 11 (ROR) for ADD shifted register (0x8bc20020)
+      const rorCode = new Uint8Array([0x20, 0x00, 0xc2, 0x8b]);
+      busMaster.writePhysical(0x1000n, rorCode);
+
+      const res1 = engine.step();
+      expect(res1.executed).toBe(false);
+      expect(res1.reason).toBe('INVALID_INSTRUCTION');
+      expect(res1.fault).toContain('Reserved shift type');
+
+      // 2. Reserved imm6 (>= 32) for 32-bit ADD shifted register (0x0b028020: imm6 = 32)
+      engine.reset(0x1000n);
+      const imm6Code = new Uint8Array([0x20, 0x80, 0x02, 0x0b]);
+      busMaster.writePhysical(0x1000n, imm6Code);
+
+      const res2 = engine.step();
+      expect(res2.executed).toBe(false);
+      expect(res2.reason).toBe('INVALID_INSTRUCTION');
+      expect(res2.fault).toContain('Reserved imm6 shift amount');
+    });
+
+    it('rejects reserved hw shift amounts in MOVZ, MOVN, and MOVK for 32-bit registers', () => {
+      // 1. movz w0, #1, lsl #32 (hw = 2 -> 0x52c00020)
+      const movzCode = new Uint8Array([0x20, 0x00, 0xc0, 0x52]);
+      busMaster.writePhysical(0x1000n, movzCode);
+      const resMovz = engine.step();
+      expect(resMovz.executed).toBe(false);
+      expect(resMovz.reason).toBe('INVALID_INSTRUCTION');
+      expect(resMovz.fault).toContain('Reserved hw shift');
+
+      // 2. movn w0, #1, lsl #32 (hw = 2 -> 0x12c00020)
+      engine.reset(0x1000n);
+      const movnCode = new Uint8Array([0x20, 0x00, 0xc0, 0x12]);
+      busMaster.writePhysical(0x1000n, movnCode);
+      const resMovn = engine.step();
+      expect(resMovn.executed).toBe(false);
+      expect(resMovn.reason).toBe('INVALID_INSTRUCTION');
+
+      // 3. movk w0, #1, lsl #32 (hw = 2 -> 0x72c00020)
+      engine.reset(0x1000n);
+      const movkCode = new Uint8Array([0x20, 0x00, 0xc0, 0x72]);
+      busMaster.writePhysical(0x1000n, movkCode);
+      const resMovk = engine.step();
+      expect(resMovk.executed).toBe(false);
+      expect(resMovk.reason).toBe('INVALID_INSTRUCTION');
+    });
+
+    it('isolates SIMD/FP Load/Store instructions from general-purpose Load/Store handlers', () => {
+      // SIMD/FP ldr q0, [x0] (V = 1: 0x3dc00000)
+      const simdLoad = new Uint8Array([0x00, 0x00, 0xc0, 0x3d]);
+      busMaster.writePhysical(0x1000n, simdLoad);
+
+      const res = engine.step();
+      expect(res.executed).toBe(false);
+      expect(res.reason).toBe('UNSUPPORTED_INSTRUCTION');
+      expect(res.fault).toContain('SIMD/FP Load/Store');
+    });
+
+    it('executes signed load instructions (LDRSB, LDRSH, LDRSW) with exact sign extension', () => {
+      // Write negative test bytes at address 0x2000
+      // 0x2000: 0x80 (-128 byte)
+      // 0x2002: 0x8000 (-32768 halfword in little endian: 0x00, 0x80)
+      // 0x2004: 0x80000000 (-2147483648 word in little endian: 0x00, 0x00, 0x00, 0x80)
+      busMaster.writePhysical(
+        0x2000n,
+        new Uint8Array([0x80, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80])
+      );
+      engine.setRegister('x1', 0x2000n);
+
+      // 1. ldrsb x0, [x1, #0] (0x39800020: size=0, opc=2, imm12=0, rn=1, rt=0)
+      // Sign-extends 8-bit negative value into 64-bit X0
+      const ldrsbXCode = new Uint8Array([0x20, 0x00, 0x80, 0x39]);
+      busMaster.writePhysical(0x1000n, ldrsbXCode);
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(engine.getRegister('x0')).toBe(0xffffffffffffff80n);
+
+      // 2. ldrsb w2, [x1, #0] (0x39c00022: size=0, opc=3, imm12=0, rn=1, rt=2)
+      // Sign-extends 8-bit negative value into 32-bit W2, zeroing upper 32 bits
+      engine.reset(0x1000n);
+      engine.setRegister('x1', 0x2000n);
+      const ldrsbWCode = new Uint8Array([0x22, 0x00, 0xc0, 0x39]);
+      busMaster.writePhysical(0x1000n, ldrsbWCode);
+      const step2 = engine.step();
+      expect(step2.executed).toBe(true);
+      expect(engine.getRegister('x2')).toBe(0x00000000ffffff80n);
+
+      // 3. ldrsw x3, [x1, #4] (0xb9800423: size=2, opc=2, imm12=1 -> offset=4, rn=1, rt=3)
+      // Sign-extends 32-bit negative word into 64-bit X3
+      engine.reset(0x1000n);
+      engine.setRegister('x1', 0x2000n);
+      const ldrswCode = new Uint8Array([0x23, 0x04, 0x80, 0xb9]);
+      busMaster.writePhysical(0x1000n, ldrswCode);
+      const step3 = engine.step();
+      expect(step3.executed).toBe(true);
+      expect(engine.getRegister('x3')).toBe(0xffffffff80000000n);
+    });
+
+    it('validates load/store pair (LDP/STP) addressing modes, opcodes, and register constraints', () => {
+      // 1. Addressing mode 00 is unallocated -> INVALID_INSTRUCTION (0xa80007e0)
+      const invalidModeCode = new Uint8Array([0xe0, 0x07, 0x00, 0xa8]);
+      busMaster.writePhysical(0x1000n, invalidModeCode);
+      const resMode = engine.step();
+      expect(resMode.executed).toBe(false);
+      expect(resMode.reason).toBe('INVALID_INSTRUCTION');
+      expect(resMode.fault).toContain('Unallocated load/store pair addressing mode');
+
+      // 2. OPC 11 is unallocated -> INVALID_INSTRUCTION (0xe90007e0)
+      engine.reset(0x1000n);
+      const invalidOpcCode = new Uint8Array([0xe0, 0x07, 0x00, 0xe9]);
+      busMaster.writePhysical(0x1000n, invalidOpcCode);
+      const resOpc = engine.step();
+      expect(resOpc.executed).toBe(false);
+      expect(resOpc.reason).toBe('INVALID_INSTRUCTION');
+
+      // 3. LDP with writeback where base register is also destination register is invalid (0xa9c10400)
+      engine.reset(0x1000n);
+      const ldpConflictCode = new Uint8Array([0x00, 0x04, 0xc1, 0xa9]);
+      busMaster.writePhysical(0x1000n, ldpConflictCode);
+      const resConflict = engine.step();
+      expect(resConflict.executed).toBe(false);
+      expect(resConflict.reason).toBe('INVALID_INSTRUCTION');
+      expect(resConflict.fault).toContain('Invalid load pair with writeback');
+    });
+
+    it('wraps backward branch targets in 64-bit address space cleanly modulo 2^64', () => {
+      // Branch offset -16 bytes (-4 instructions) from address 0x1000 -> 0x0ff0
+      // 0x17fffffc: B -4 instructions
+      const backwardBranch = new Uint8Array([0xfc, 0xff, 0xff, 0x17]);
+      busMaster.writePhysical(0x1000n, backwardBranch);
+
+      const res = engine.step();
+      expect(res.executed).toBe(true);
+      expect(engine.pc).toBe(0x0ff0n);
+    });
+  });
 });

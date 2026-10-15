@@ -644,6 +644,9 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
       else if ((opcode & 0x7f800000) === 0x52800000) {
         const sf = (opcode >> 31) & 1;
         const hw = (opcode >> 21) & 3;
+        if (sf === 0 && hw >= 2) {
+          throw new InvalidInstructionError(`Reserved hw shift (${hw}) for 32-bit MOVZ at ${formatAddress(currentPc)}`);
+        }
         const imm16 = (opcode >> 5) & 0xffff;
         const rd = opcode & 0x1f;
         const shift = hw * 16;
@@ -656,6 +659,9 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
       else if ((opcode & 0x7f800000) === 0x12800000) {
         const sf = (opcode >> 31) & 1;
         const hw = (opcode >> 21) & 3;
+        if (sf === 0 && hw >= 2) {
+          throw new InvalidInstructionError(`Reserved hw shift (${hw}) for 32-bit MOVN at ${formatAddress(currentPc)}`);
+        }
         const imm16 = (opcode >> 5) & 0xffff;
         const rd = opcode & 0x1f;
         const shift = hw * 16;
@@ -668,53 +674,71 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
       else if ((opcode & 0x7f800000) === 0x72800000) {
         const sf = (opcode >> 31) & 1;
         const hw = (opcode >> 21) & 3;
+        if (sf === 0 && hw >= 2) {
+          throw new InvalidInstructionError(`Reserved hw shift (${hw}) for 32-bit MOVK at ${formatAddress(currentPc)}`);
+        }
         const imm16 = (opcode >> 5) & 0xffff;
         const rd = opcode & 0x1f;
         const shift = hw * 16;
-        const current = this.getX(rd);
+        const current = sf === 1 ? this.getX(rd) : (this.getX(rd) & MASK_32);
         const clearMask = ~(0xffffn << BigInt(shift));
         const val = (current & clearMask) | (BigInt(imm16) << BigInt(shift));
         this.setX(rd, val, sf === 1);
         disassembly = `movk ${sf ? 'x' : 'w'}${rd}, #0x${imm16.toString(16)}${shift ? ', lsl #' + shift : ''}`;
       }
 
-      // 7. ADD / SUB / ADDS / SUBS (Immediate): [sf:1] [op:1] [S:1] 100010 [shift:2] [imm12:12] [Rn:5] [Rd:5]
-      else if ((opcode & 0x1f000000) === 0x11000000) {
+      // 7. ADD / SUB / ADDS / SUBS (Immediate): [sf:1] [op:1] [S:1] 100010 [sh:1] [imm12:12] [Rn:5] [Rd:5]
+      else if ((opcode & 0x1f800000) === 0x11000000) {
         const sf = (opcode >> 31) & 1;
         const op = (opcode >> 30) & 1;
         const s = (opcode >> 29) & 1;
-        const shift = (opcode >> 22) & 3;
+        const sh = (opcode >> 22) & 1; // 1-bit shift: 0 = LSL #0, 1 = LSL #12
         const imm12 = (opcode >> 10) & 0xfff;
         const rn = (opcode >> 5) & 0x1f;
         const rd = opcode & 0x1f;
-        const imm = BigInt(imm12) << (shift === 1 ? 12n : 0n);
-        const valN = rn === 31 ? this.getSP() : this.getX(rn);
+        const imm = BigInt(imm12) << (sh === 1 ? 12n : 0n);
+        const mask = sf === 1 ? MASK_64 : MASK_32;
+
+        // Rn == 31 is SP / WSP
+        const valN = (rn === 31 ? this.getSP() : this.getX(rn)) & mask;
 
         if (op === 0) {
           // ADD / ADDS
           if (s === 1) {
+            // ADDS (sets flags; Rd == 31 is XZR/WZR, writes discarded)
             const res = this.setFlagsAdd(valN, imm, sf === 1);
             if (rd !== 31) this.setX(rd, res, sf === 1);
-            disassembly = `adds ${sf ? 'x' : 'w'}${rd}, ${rn === 31 ? 'sp' : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}`;
+            disassembly = `adds ${sf ? 'x' : 'w'}${rd}, ${rn === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}${sh ? ', lsl #12' : ''}`;
           } else {
-            const res = valN + imm;
-            if (rd === 31) this.setSP(res); else this.setX(rd, res, sf === 1);
-            disassembly = `add ${rd === 31 ? 'sp' : (sf ? 'x' : 'w') + rd}, ${rn === 31 ? 'sp' : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}`;
+            // ADD (Rd == 31 is SP/WSP)
+            const res = (valN + imm) & mask;
+            if (rd === 31) {
+              this.setSP(res);
+            } else {
+              this.setX(rd, res, sf === 1);
+            }
+            disassembly = `add ${rd === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rd}, ${rn === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}${sh ? ', lsl #12' : ''}`;
           }
         } else {
           // SUB / SUBS / CMP
           if (s === 1) {
+            // SUBS / CMP (sets flags; Rd == 31 is CMP)
             const res = this.setFlagsSub(valN, imm, sf === 1);
             if (rd === 31) {
-              disassembly = `cmp ${rn === 31 ? 'sp' : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}`;
+              disassembly = `cmp ${rn === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}${sh ? ', lsl #12' : ''}`;
             } else {
               this.setX(rd, res, sf === 1);
-              disassembly = `subs ${sf ? 'x' : 'w'}${rd}, ${rn === 31 ? 'sp' : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}`;
+              disassembly = `subs ${sf ? 'x' : 'w'}${rd}, ${rn === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}${sh ? ', lsl #12' : ''}`;
             }
           } else {
-            const res = valN - imm;
-            if (rd === 31) this.setSP(res); else this.setX(rd, res, sf === 1);
-            disassembly = `sub ${rd === 31 ? 'sp' : (sf ? 'x' : 'w') + rd}, ${rn === 31 ? 'sp' : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}`;
+            // SUB (Rd == 31 is SP/WSP)
+            const res = (valN - imm + (mask + 1n)) & mask;
+            if (rd === 31) {
+              this.setSP(res);
+            } else {
+              this.setX(rd, res, sf === 1);
+            }
+            disassembly = `sub ${rd === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rd}, ${rn === 31 ? (sf ? 'sp' : 'wsp') : (sf ? 'x' : 'w') + rn}, #0x${imm12.toString(16)}${sh ? ', lsl #12' : ''}`;
           }
         }
       }
@@ -730,43 +754,60 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         const rn = (opcode >> 5) & 0x1f;
         const rd = opcode & 0x1f;
 
-        let valM = this.getX(rm);
-        if (shiftType === 0) valM = valM << BigInt(imm6);
-        else if (shiftType === 1) valM = valM >> BigInt(imm6);
-        else if (shiftType === 2) {
-          const signBit = sf ? SIGN_BIT_64 : SIGN_BIT_32;
-          const isNeg = ((valM >> signBit) & 1n) === 1n;
-          valM = valM >> BigInt(imm6);
-          if (isNeg) {
-            const pad = (sf ? MASK_64 : MASK_32) ^ ((1n << (BigInt(sf ? 64 : 32) - BigInt(imm6))) - 1n);
-            valM |= pad;
-          }
+        // In ARM A64 Add/subtract (shifted register):
+        // 1. shift == 3 (11) is RESERVED / UNDEFINED
+        if (shiftType === 3) {
+          throw new InvalidInstructionError(`Reserved shift type (11) for Add/subtract (shifted register) at ${formatAddress(currentPc)}`);
+        }
+        // 2. In 32-bit (sf == 0), imm6<5> must be 0 (shift amount in range 0..31)
+        if (sf === 0 && (imm6 & 0x20) !== 0) {
+          throw new InvalidInstructionError(`Reserved imm6 shift amount (${imm6}) for 32-bit Add/subtract (shifted register) at ${formatAddress(currentPc)}`);
         }
 
-        const valN = this.getX(rn);
+        const width = sf === 1 ? 64 : 32;
+        const mask = sf === 1 ? MASK_64 : MASK_32;
+        const amt = BigInt(imm6);
+
+        // Fetch operands ensuring 32-bit operations do not consume upper 32 bits
+        let valM = (rm === 31 ? 0n : this.getX(rm)) & mask;
+        const valN = (rn === 31 ? 0n : this.getX(rn)) & mask;
+
+        // Apply shift: 00 = LSL, 01 = LSR, 10 = ASR
+        if (shiftType === 0) {
+          valM = (valM << amt) & mask;
+        } else if (shiftType === 1) {
+          valM = (valM >> amt) & mask;
+        } else if (shiftType === 2) {
+          valM = BigInt.asUintN(width, BigInt.asIntN(width, valM) >> amt);
+        }
+
+        const regP = sf ? 'x' : 'w';
+        const shiftNames = ['lsl', 'lsr', 'asr'];
+        const shiftStr = imm6 > 0 ? `, ${shiftNames[shiftType]} #${imm6}` : '';
+
         if (op === 0) {
           if (s === 1) {
             const res = this.setFlagsAdd(valN, valM, sf === 1);
-            this.setX(rd, res, sf === 1);
-            disassembly = `adds ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+            if (rd !== 31) this.setX(rd, res, sf === 1);
+            disassembly = `adds ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
           } else {
-            const res = valN + valM;
-            this.setX(rd, res, sf === 1);
-            disassembly = `add ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+            const res = (valN + valM) & mask;
+            if (rd !== 31) this.setX(rd, res, sf === 1);
+            disassembly = `add ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
           }
         } else {
           if (s === 1) {
             const res = this.setFlagsSub(valN, valM, sf === 1);
             if (rd === 31) {
-              disassembly = `cmp ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+              disassembly = `cmp ${regP}${rn}, ${regP}${rm}${shiftStr}`;
             } else {
               this.setX(rd, res, sf === 1);
-              disassembly = `subs ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+              disassembly = `subs ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
             }
           } else {
-            const res = valN - valM;
-            this.setX(rd, res, sf === 1);
-            disassembly = `sub ${sf ? 'x' : 'w'}${rd}, ${sf ? 'x' : 'w'}${rn}, ${sf ? 'x' : 'w'}${rm}`;
+            const res = (valN - valM + (mask + 1n)) & mask;
+            if (rd !== 31) this.setX(rd, res, sf === 1);
+            disassembly = `sub ${regP}${rd}, ${regP}${rn}, ${regP}${rm}${shiftStr}`;
           }
         }
       }
@@ -887,7 +928,7 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         let imm26 = opcode & 0x03ffffff;
         if (imm26 & 0x02000000) imm26 |= ~0x03ffffff; // sign extend 26 bits
         const offset = BigInt(imm26) * 4n;
-        nextPc = currentPc + offset;
+        nextPc = (currentPc + offset) & MASK_64;
         disassembly = `b ${formatAddress(nextPc)}`;
       }
 
@@ -896,8 +937,8 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         let imm26 = opcode & 0x03ffffff;
         if (imm26 & 0x02000000) imm26 |= ~0x03ffffff;
         const offset = BigInt(imm26) * 4n;
-        this.setX(30, currentPc + 4n, true); // LR = next PC
-        nextPc = currentPc + offset;
+        this.setX(30, (currentPc + 4n) & MASK_64, true); // LR = next PC
+        nextPc = (currentPc + offset) & MASK_64;
         disassembly = `bl ${formatAddress(nextPc)}`;
       }
 
@@ -907,13 +948,14 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         let imm19 = (opcode >> 5) & 0x7ffff;
         if (imm19 & 0x40000) imm19 |= ~0x7ffff; // sign extend 19 bits
         const offset = BigInt(imm19) * 4n;
+        const target = (currentPc + offset) & MASK_64;
         const taken = this.checkCondition(cond);
         if (taken) {
-          nextPc = currentPc + offset;
+          nextPc = target;
         } else {
-          nextPc = currentPc + 4n;
+          nextPc = (currentPc + 4n) & MASK_64;
         }
-        disassembly = `b.cond_${cond} ${formatAddress(currentPc + offset)} (${taken ? 'taken' : 'not taken'})`;
+        disassembly = `b.cond_${cond} ${formatAddress(target)} (${taken ? 'taken' : 'not taken'})`;
       }
 
       // 13. COMPARE AND BRANCH ON ZERO / NON-ZERO (CBZ / CBNZ): [sf:1] 011010 [op:1] [imm19:19] [Rt:5]
@@ -924,45 +966,47 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         if (imm19 & 0x40000) imm19 |= ~0x7ffff;
         const rt = opcode & 0x1f;
         const offset = BigInt(imm19) * 4n;
+        const target = (currentPc + offset) & MASK_64;
         const val = sf ? this.getX(rt) : (this.getX(rt) & MASK_32);
         const taken = isCbnz ? (val !== 0n) : (val === 0n);
         if (taken) {
-          nextPc = currentPc + offset;
+          nextPc = target;
         } else {
-          nextPc = currentPc + 4n;
+          nextPc = (currentPc + 4n) & MASK_64;
         }
-        disassembly = `${isCbnz ? 'cbnz' : 'cbz'} ${sf ? 'x' : 'w'}${rt}, ${formatAddress(currentPc + offset)}`;
+        disassembly = `${isCbnz ? 'cbnz' : 'cbz'} ${sf ? 'x' : 'w'}${rt}, ${formatAddress(target)}`;
       }
 
       // 14. UNCONDITIONAL BRANCH REGISTER (RET, BR, BLR): 1101011 00 [opc:2] 11111 000000 [Rn:5] 00000
       else if (((opcode & 0xfffffc1f) >>> 0) === 0xd65f0000) {
         // RET
         const rn = (opcode >> 5) & 0x1f;
-        nextPc = this.getX(rn);
+        nextPc = this.getX(rn) & MASK_64;
         disassembly = `ret ${rn === 30 ? '' : 'x' + rn}`.trim();
       } else if (((opcode & 0xfffffc1f) >>> 0) === 0xd61f0000) {
         // BR
         const rn = (opcode >> 5) & 0x1f;
-        nextPc = this.getX(rn);
+        nextPc = this.getX(rn) & MASK_64;
         disassembly = `br x${rn}`;
       } else if (((opcode & 0xfffffc1f) >>> 0) === 0xd63f0000) {
         // BLR
         const rn = (opcode >> 5) & 0x1f;
-        this.setX(30, currentPc + 4n, true);
-        nextPc = this.getX(rn);
+        this.setX(30, (currentPc + 4n) & MASK_64, true);
+        nextPc = this.getX(rn) & MASK_64;
         disassembly = `blr x${rn}`;
       }
 
-      // 15. LOAD / STORE REGISTER (Unsigned Immediate): 00 111 0 01 [size:2] [V:0] [opc:2] [imm12:12] [Rn:5] [Rt:5]
-      else if ((opcode & 0x3b000000) === 0x39000000) {
+      // 15. LOAD / STORE REGISTER (Unsigned Immediate, GPR): [size:2] 111 0 01 [opc:2] [imm12:12] [Rn:5] [Rt:5]
+      // Bits 29..24 must be 111001 (0x39). Bit 26 (V) must be 0 for general-purpose registers.
+      else if ((opcode & 0x3f000000) === 0x39000000) {
         const size = (opcode >> 30) & 3; // 0=8-bit, 1=16-bit, 2=32-bit, 3=64-bit
-        const opc = (opcode >> 22) & 3; // 0=STR, 1=LDR
+        const opc = (opcode >> 22) & 3;
         const imm12 = (opcode >> 10) & 0xfff;
         const rn = (opcode >> 5) & 0x1f;
         const rt = opcode & 0x1f;
         const offset = BigInt(imm12) << BigInt(size);
         const base = rn === 31 ? this.getSP() : this.getX(rn);
-        const targetAddr = base + offset;
+        const targetAddr = (base + offset) & MASK_64;
         const byteCount = 1 << size;
 
         if (opc === 0) {
@@ -976,7 +1020,7 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
           const mnemonic = ['strb', 'strh', 'str', 'str'][size];
           disassembly = `${mnemonic} ${size === 3 ? 'x' : 'w'}${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
         } else if (opc === 1) {
-          // LOAD (LDRB, LDRH, LDR)
+          // LOAD (LDRB, LDRH, LDR) - unsigned load, zero-extended
           const buf = this.readPhysicalSafe(targetAddr, byteCount);
           let val = 0n;
           for (let i = 0; i < byteCount; i++) {
@@ -985,21 +1029,71 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
           this.setX(rt, val, size === 3);
           const mnemonic = ['ldrb', 'ldrh', 'ldr', 'ldr'][size];
           disassembly = `${mnemonic} ${size === 3 ? 'x' : 'w'}${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
-        } else {
-          throw new UnsupportedInstructionError(`Unsupported load/store opcode variant: opc=${opc}`);
+        } else if (opc === 2) {
+          // SIGNED LOAD to 64-bit register (LDRSB, LDRSH, LDRSW) or PRFM (prefetch for size=3)
+          if (size === 3) {
+            // PRFM (prefetch memory hint)
+            disassembly = `prfm #0x${rt.toString(16)}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
+          } else {
+            const buf = this.readPhysicalSafe(targetAddr, byteCount);
+            let val = 0n;
+            for (let i = 0; i < byteCount; i++) {
+              val |= BigInt(buf[i]) << BigInt(i * 8);
+            }
+            const signExtended = BigInt.asIntN(byteCount * 8, val);
+            this.setX(rt, BigInt.asUintN(64, signExtended), true);
+            const mnemonic = ['ldrsb', 'ldrsh', 'ldrsw'][size];
+            disassembly = `${mnemonic} x${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
+          }
+        } else if (opc === 3) {
+          // SIGNED LOAD to 32-bit register (LDRSB Wt, LDRSH Wt)
+          if (size >= 2) {
+            // Unallocated opcode for size >= 2 with opc == 3
+            throw new InvalidInstructionError(`Unallocated load/store encoding: size=${size}, opc=3 at ${formatAddress(currentPc)}`);
+          }
+          const buf = this.readPhysicalSafe(targetAddr, byteCount);
+          let val = 0n;
+          for (let i = 0; i < byteCount; i++) {
+            val |= BigInt(buf[i]) << BigInt(i * 8);
+          }
+          const signExtended = BigInt.asIntN(byteCount * 8, val);
+          this.setX(rt, BigInt.asUintN(32, signExtended), false);
+          const mnemonic = ['ldrsb', 'ldrsh'][size];
+          disassembly = `${mnemonic} w${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
         }
       }
 
-      // 16. LOAD / STORE REGISTER PAIR (LDP / STP): [opc:2] 101 0 [mode:3] [L:1] [imm7:7] [Rt2:5] [Rn:5] [Rt:5]
-      else if ((opcode & 0x3e000000) === 0x28000000 || (opcode & 0x3e000000) === 0x29000000) {
-        const opc = (opcode >> 30) & 3; // 0=32-bit, 2=64-bit
+      // 16. LOAD / STORE REGISTER PAIR (LDP / STP, GPR): [opc:2] 101 0 0 [mode:2] [L:1] [imm7:7] [Rt2:5] [Rn:5] [Rt:5]
+      // Bits 29..25 must be 10100 (0x14). Bit 26 (V) must be 0 for general-purpose registers.
+      else if ((opcode & 0x3e000000) === 0x28000000) {
+        const opc = (opcode >> 30) & 3; // 00=32-bit, 01=signed (LDPSW), 10=64-bit, 11=unallocated
         const isLoad = ((opcode >> 22) & 1) === 1;
-        const mode = (opcode >> 23) & 3; // 1=post-index, 2=signed offset, 3=pre-index
+        const mode = (opcode >> 23) & 3; // 01=post-index, 10=signed offset, 11=pre-index, 00=unallocated
+
+        if (mode === 0) {
+          throw new InvalidInstructionError(`Unallocated load/store pair addressing mode (00) at ${formatAddress(currentPc)}`);
+        }
+        if (opc === 3) {
+          throw new InvalidInstructionError(`Unallocated load/store pair opc (11) at ${formatAddress(currentPc)}`);
+        }
+        if (opc === 1 && !isLoad) {
+          throw new InvalidInstructionError(`Unallocated store pair opc (01) at ${formatAddress(currentPc)}`);
+        }
+
         let imm7 = (opcode >> 15) & 0x7f;
         if (imm7 & 0x40) imm7 |= ~0x7f; // sign extend 7 bits
         const rt2 = (opcode >> 10) & 0x1f;
         const rn = (opcode >> 5) & 0x1f;
         const rt = opcode & 0x1f;
+
+        if (isLoad && (mode === 1 || mode === 3) && rn !== 31 && (rn === rt || rn === rt2)) {
+          throw new InvalidInstructionError(`Invalid load pair with writeback to destination register (Rn=${rn}) at ${formatAddress(currentPc)}`);
+        }
+        if (isLoad && rt === rt2 && rt !== 31) {
+          throw new InvalidInstructionError(`Invalid load pair with identical destination registers (Rt=Rt2=${rt}) at ${formatAddress(currentPc)}`);
+        }
+
+        const is64 = opc === 2 || (opc === 1 && isLoad);
         const scale = opc === 2 ? 3 : 2;
         const byteCount = 1 << scale;
         const offset = BigInt(imm7) << BigInt(scale);
@@ -1007,22 +1101,28 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
 
         let targetAddr = base;
         if (mode === 2 || mode === 3) {
-          targetAddr = base + offset;
+          targetAddr = (base + offset) & MASK_64;
         }
 
         if (isLoad) {
-          // LDP
+          // LDP / LDPSW
           const buf1 = this.readPhysicalSafe(targetAddr, byteCount);
-          const buf2 = this.readPhysicalSafe(targetAddr + BigInt(byteCount), byteCount);
+          const buf2 = this.readPhysicalSafe((targetAddr + BigInt(byteCount)) & MASK_64, byteCount);
           let val1 = 0n;
           let val2 = 0n;
           for (let i = 0; i < byteCount; i++) {
             val1 |= BigInt(buf1[i]) << BigInt(i * 8);
             val2 |= BigInt(buf2[i]) << BigInt(i * 8);
           }
-          this.setX(rt, val1, opc === 2);
-          this.setX(rt2, val2, opc === 2);
-          disassembly = `ldp ${opc === 2 ? 'x' : 'w'}${rt}, ${opc === 2 ? 'x' : 'w'}${rt2}, [${rn === 31 ? 'sp' : 'x' + rn}]`;
+          if (opc === 1) {
+            // LDPSW: sign-extend 32-bit words into 64-bit registers
+            val1 = BigInt.asUintN(64, BigInt.asIntN(32, val1));
+            val2 = BigInt.asUintN(64, BigInt.asIntN(32, val2));
+          }
+          this.setX(rt, val1, is64);
+          this.setX(rt2, val2, is64);
+          const regP = is64 ? 'x' : 'w';
+          disassembly = `${opc === 1 ? 'ldpsw' : 'ldp'} ${regP}${rt}, ${regP}${rt2}, [${rn === 31 ? 'sp' : 'x' + rn}]`;
         } else {
           // STP
           const val1 = this.getX(rt);
@@ -1034,15 +1134,22 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
             buf2[i] = Number((val2 >> BigInt(i * 8)) & 0xffn);
           }
           this.writePhysicalSafe(targetAddr, buf1);
-          this.writePhysicalSafe(targetAddr + BigInt(byteCount), buf2);
-          disassembly = `stp ${opc === 2 ? 'x' : 'w'}${rt}, ${opc === 2 ? 'x' : 'w'}${rt2}, [${rn === 31 ? 'sp' : 'x' + rn}]`;
+          this.writePhysicalSafe((targetAddr + BigInt(byteCount)) & MASK_64, buf2);
+          disassembly = `stp ${is64 ? 'x' : 'w'}${rt}, ${is64 ? 'x' : 'w'}${rt2}, [${rn === 31 ? 'sp' : 'x' + rn}]`;
         }
 
         // Handle writeback for pre-index (3) or post-index (1)
         if (mode === 1 || mode === 3) {
-          const newBase = base + offset;
+          const newBase = (base + offset) & MASK_64;
           if (rn === 31) this.setSP(newBase); else this.setX(rn, newBase, true);
         }
+      }
+
+      // 17. REJECT SIMD / FP LOAD/STORE OR UNSUPPORTED CLASSES TRUTHFULLY
+      else if ((opcode & 0x3f000000) === 0x3d000000 || (opcode & 0x3e000000) === 0x2c000000) {
+        throw new UnsupportedInstructionError(
+          `SIMD/FP Load/Store (opcode 0x${opcode.toString(16).padStart(8, '0')}) is not implemented at ${formatAddress(currentPc)}`
+        );
       }
 
       else {
