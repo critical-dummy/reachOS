@@ -9,10 +9,14 @@ import {
   createHostAccessContext,
   DEFAULT_HOST_ACCESS_CONTEXT,
   DeviceClass,
+  DISPLAY_HEIGHT,
+  DISPLAY_WIDTH,
   Frt64CoreRunState,
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
+  IDisplayOutputBackend,
+  IFramebuffer,
   IPhysicalMemoryRegion,
   isValidAddress64,
   MemoryRegionType,
@@ -996,6 +1000,324 @@ describe('Fabric Dessert Core Foundation', () => {
       // Clean up resources cleanly
       instance.stop();
       expect(instance.getState()).toBe(RuntimeLifecycleState.STOPPED);
+    });
+  });
+
+  describe('Native JS-VM to Fabric Dessert Display MMIO Integration Proof', () => {
+    it('executes real AArch64 machine instructions from Boot ROM to write to framebuffer MMIO, issues display flush command via ctrl MMIO, and presents frame via SystemRenderer', () => {
+      // 10-instruction AArch64 test program:
+      // 0x00: MOVZ X3, #0x8000, LSL #16 (0xD2B00003) -> X3 = 0x80000000 (Display Ctrl Aperture)
+      // 0x04: LDR W5, [X3, #0]          (0xB9400065) -> Read Magic: W5 = 0x53494446 ("FDIS")
+      // 0x08: LDR W6, [X3, #4]          (0xB9400466) -> Read Width: W6 = 1080
+      // 0x0C: MOVZ X1, #0x8001, LSL #16 (0xD2B00021) -> X1 = 0x80010000 (Framebuffer Aperture Base)
+      // 0x10: MOVZ X2, #0xCAFE, LSL #16 (0xD2B95FC2) -> X2 = 0x00000000CAFE0000
+      // 0x14: MOVK X2, #0xBABE, LSL #0  (0xF29757C2) -> X2 = 0x00000000CAFEBABE
+      // 0x18: STR W2, [X1, #0]          (0xB9000022) -> Write 32-bit pixel 0xCAFEBABE at pixel (0, 0)
+      // 0x1C: MOVZ X4, #1               (0xD2800024) -> X4 = 1 (Flush/Commit command)
+      // 0x20: STR W4, [X3, #0x18]       (0xB9001864) -> Write flush command (1) to Ctrl offset 0x18
+      // 0x24: HLT #0                    (0xD4400000) -> Deliberate CPU halt
+      const bootPayload = new Uint8Array([
+        0x03, 0x00, 0xb0, 0xd2, // 0x00: MOVZ X3, #0x8000, LSL #16
+        0x65, 0x00, 0x40, 0xb9, // 0x04: LDR W5, [X3, #0]
+        0x66, 0x04, 0x40, 0xb9, // 0x08: LDR W6, [X3, #4]
+        0x21, 0x00, 0xb0, 0xd2, // 0x0C: MOVZ X1, #0x8001, LSL #16
+        0xc2, 0x5f, 0xb9, 0xd2, // 0x10: MOVZ X2, #0xCAFE, LSL #16
+        0xc2, 0x57, 0x97, 0xf2, // 0x14: MOVK X2, #0xBABE, LSL #0
+        0x22, 0x00, 0x00, 0xb9, // 0x18: STR W2, [X1, #0]
+        0x24, 0x00, 0x80, 0xd2, // 0x1C: MOVZ X4, #1
+        0x64, 0x18, 0x00, 0xb9, // 0x20: STR W4, [X3, #0x18]
+        0x00, 0x00, 0x40, 0xd4, // 0x24: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n, // 1 MiB
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+
+      // Verify MMIO allocations for display device
+      const displayDevice = instance.board.displayDevice;
+      const ctrlBase = displayDevice.getMmioBase('ctrl');
+      const fbBase = displayDevice.getFramebufferApertureBase();
+      expect(ctrlBase).toBe(0x80000000n);
+      expect(fbBase).toBe(0x80010000n);
+
+      // Initialize runtime: resets board and CPU cores
+      instance.initialize();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.READY);
+
+      // Track frame submissions to output backend
+      let presentCallCount = 0;
+      let lastPresentedPixel = 0;
+      let presentedPixelSnapshot: number[] = [];
+
+      const mockBackend: IDisplayOutputBackend = {
+        targetWidth: DISPLAY_WIDTH,
+        targetHeight: DISPLAY_HEIGHT,
+        present: (fb: IFramebuffer) => {
+          presentCallCount++;
+          lastPresentedPixel = fb.readPixel(0, 0);
+          presentedPixelSnapshot = [fb.readPixel(0, 0), fb.readPixel(1, 0)];
+        },
+      };
+
+      displayDevice.systemRenderer.attachOutputBackend(mockBackend);
+      // Initial attach performs 1 present call to sync initial state
+      expect(presentCallCount).toBe(1);
+      expect(lastPresentedPixel).toBe(0x000000ff); // Initial black, alpha 255
+
+      const primaryCore = instance.cpu.getPrimaryCore();
+      expect(primaryCore.pc).toBe(0x00000000n);
+
+      // Start runtime: primary core enters RUNNING
+      instance.start();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.RUNNING);
+      expect(primaryCore.getStatus().runState).toBe(Frt64CoreRunState.RUNNING);
+
+      // Execute instructions via execution pump
+      const executed = instance.executionPump.pumpSlice(20);
+      expect(executed).toBe(10);
+      expect(primaryCore.getStatus().cyclesExecuted).toBe(10n);
+
+      // Verify register state
+      expect(primaryCore.getRegister('x3')).toBe(0x80000000n); // Display Ctrl Base
+      expect(primaryCore.getRegister('w5')).toBe(0x53494446n); // Magic "FDIS"
+      expect(primaryCore.getRegister('w6')).toBe(1080n);       // Display Width
+      expect(primaryCore.getRegister('x1')).toBe(0x80010000n); // Framebuffer Base
+      expect(primaryCore.getRegister('x2')).toBe(0xcafebaben); // Pixel 0xCAFEBABE
+      expect(primaryCore.getRegister('x4')).toBe(1n);          // Flush command
+
+      // Verify pixel in framebuffer aperture
+      // Little-endian 0xCAFEBABE -> Byte 0: 0xBE (R), Byte 1: 0xBA (G), Byte 2: 0xFE (B), Byte 3: 0xCA (A)
+      // readPixel(0, 0) -> ((0xBE << 24) | (0xBA << 16) | (0xFE << 8) | 0xCA) >>> 0 = 0xBEBAFECA
+      const expectedPixel = (((0xbe << 24) | (0xba << 16) | (0xfe << 8) | 0xca) >>> 0);
+      expect(displayDevice.framebuffer.readPixel(0, 0)).toBe(expectedPixel);
+
+      // Verify SystemRenderer presentation to backend
+      expect(presentCallCount).toBe(2); // 1 initial attach + 1 guest flush command
+      expect(lastPresentedPixel).toBe(expectedPixel);
+      expect(presentedPixelSnapshot[0]).toBe(expectedPixel);
+      expect(displayDevice.framebuffer.isDirty()).toBe(false); // Cleared upon flush
+
+      // Verify CPU reached HALTED cleanly at 0x24 (post-HLT PC = 0x28)
+      expect(primaryCore.getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+      expect(primaryCore.pc).toBe(0x00000028n);
+
+      // Verify Boot ROM remains pristine
+      expect(instance.memory.readBytes(0x00000000n, bootPayload.length)).toEqual(bootPayload);
+
+      // Further pump slices do not execute any instructions
+      expect(instance.executionPump.pumpSlice(10)).toBe(0);
+
+      instance.stop();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.STOPPED);
+    });
+
+    it('verifies instruction-by-instruction MMIO interaction and proves dirty-tracking before vs after flush command', () => {
+      const bootPayload = new Uint8Array([
+        0x03, 0x00, 0xb0, 0xd2, // 0x00: MOVZ X3, #0x8000, LSL #16
+        0x65, 0x00, 0x40, 0xb9, // 0x04: LDR W5, [X3, #0]
+        0x66, 0x04, 0x40, 0xb9, // 0x08: LDR W6, [X3, #4]
+        0x21, 0x00, 0xb0, 0xd2, // 0x0C: MOVZ X1, #0x8001, LSL #16
+        0xc2, 0x5f, 0xb9, 0xd2, // 0x10: MOVZ X2, #0xCAFE, LSL #16
+        0xc2, 0x57, 0x97, 0xf2, // 0x14: MOVK X2, #0xBABE, LSL #0
+        0x22, 0x00, 0x00, 0xb9, // 0x18: STR W2, [X1, #0]
+        0x24, 0x00, 0x80, 0xd2, // 0x1C: MOVZ X4, #1
+        0x64, 0x18, 0x00, 0xb9, // 0x20: STR W4, [X3, #0x18]
+        0x00, 0x00, 0x40, 0xd4, // 0x24: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+      const display = instance.board.displayDevice;
+
+      instance.initialize();
+
+      let presentCount = 0;
+      let lastPixelPresented = 0;
+      display.systemRenderer.attachOutputBackend({
+        targetWidth: DISPLAY_WIDTH,
+        targetHeight: DISPLAY_HEIGHT,
+        present: (fb) => {
+          presentCount++;
+          lastPixelPresented = fb.readPixel(0, 0);
+        },
+      });
+
+      expect(presentCount).toBe(1);
+      expect(lastPixelPresented).toBe(0x000000ff);
+
+      instance.start();
+
+      const primary = instance.cpu.getPrimaryCore();
+
+      // Step 1: 0x00 MOVZ X3, #0x8000, LSL #16
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('x3')).toBe(0x80000000n);
+
+      // Step 2: 0x04 LDR W5, [X3, #0] -> MMIO read magic
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('w5')).toBe(0x53494446n);
+
+      // Step 3: 0x08 LDR W6, [X3, #4] -> MMIO read width
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('w6')).toBe(1080n);
+
+      // Step 4: 0x0C MOVZ X1, #0x8001, LSL #16
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('x1')).toBe(0x80010000n);
+
+      // Step 5: 0x10 MOVZ X2, #0xCAFE, LSL #16
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('x2')).toBe(0xcafe0000n);
+
+      // Step 6: 0x14 MOVK X2, #0xBABE, LSL #0
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('x2')).toBe(0xcafebaben);
+
+      // Prior to pixel write: framebuffer is not dirty, pixel (0,0) is black
+      display.framebuffer.clearDirty();
+      expect(display.framebuffer.isDirty()).toBe(false);
+      expect(display.framebuffer.readPixel(0, 0)).toBe(0x000000ff);
+      expect(presentCount).toBe(1);
+
+      // Step 7: 0x18 STR W2, [X1, #0] -> MMIO write to Framebuffer aperture
+      const stepWrite = primary.step();
+      expect(stepWrite.executed).toBe(true);
+      expect(stepWrite.disassembly).toContain('str');
+
+      // Framebuffer now dirty with updated pixel, but NO present has occurred yet
+      const expectedPixel = (((0xbe << 24) | (0xba << 16) | (0xfe << 8) | 0xca) >>> 0);
+      expect(display.framebuffer.readPixel(0, 0)).toBe(expectedPixel);
+      expect(display.framebuffer.isDirty()).toBe(true);
+      expect(presentCount).toBe(1); // Flush has NOT yet been issued
+
+      // Step 8: 0x1C MOVZ X4, #1
+      expect(primary.step().executed).toBe(true);
+      expect(primary.getRegister('x4')).toBe(1n);
+
+      // Step 9: 0x20 STR W4, [X3, #0x18] -> MMIO write command 1 (flush) to Ctrl register
+      const stepFlush = primary.step();
+      expect(stepFlush.executed).toBe(true);
+
+      // Now present has been called via SystemRenderer!
+      expect(presentCount).toBe(2);
+      expect(lastPixelPresented).toBe(expectedPixel);
+      expect(display.framebuffer.isDirty()).toBe(false);
+
+      // Step 10: 0x24 HLT #0
+      const stepHalt = primary.step();
+      expect(stepHalt.executed).toBe(true);
+      expect(stepHalt.state).toBe(Frt64CoreRunState.HALTED);
+      expect(primary.getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+
+      instance.stop();
+    });
+
+    it('proves that guest code writing multiple pixels with immediate offsets updates framebuffer aperture and presents correctly', () => {
+      // Writes pixel (0, 0) and pixel (1, 0) using immediate offset #4
+      const bootPayload = new Uint8Array([
+        0x03, 0x00, 0xb0, 0xd2, // 0x00: MOVZ X3, #0x8000, LSL #16
+        0x21, 0x00, 0xb0, 0xd2, // 0x04: MOVZ X1, #0x8001, LSL #16
+        // Pixel 0: 0xFF0000FF (Red: R=255, G=0, B=0, A=255)
+        0xe2, 0x01, 0x80, 0x52, // 0x08: MOVZ W2, #0x00FF (sf=0, hw=0, imm16=0xFF, Rd=2)
+        0x02, 0x00, 0xa0, 0x72, // 0x0C: MOVK W2, #0x0000, LSL #16
+        0x22, 0x00, 0x00, 0xb9, // 0x10: STR W2, [X1, #0] (pixel 0)
+        // Pixel 1: 0x00FF00FF (Green: R=0, G=255, B=0, A=255 -> little-endian byte 0=0, 1=255, 2=0, 3=255 -> 0xFF00FF00)
+        0xe5, 0x01, 0x80, 0xd2, // 0x14: MOVZ X5, #0x00FF
+        0x05, 0xfe, 0xa0, 0xf2, // 0x18: MOVK X5, #0x7F00, LSL #16 -> X5 = 0x7F0000FF
+        0x25, 0x04, 0x00, 0xb9, // 0x1C: STR W5, [X1, #4] (pixel 1: imm12=1, scale=2 -> offset 4)
+        // Flush command
+        0x24, 0x00, 0x80, 0xd2, // 0x20: MOVZ X4, #1
+        0x64, 0x18, 0x00, 0xb9, // 0x24: STR W4, [X3, #0x18]
+        0x00, 0x00, 0x40, 0xd4, // 0x28: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+      let presentedPixels: [number, number] = [0, 0];
+      instance.board.displayDevice.systemRenderer.attachOutputBackend({
+        targetWidth: DISPLAY_WIDTH,
+        targetHeight: DISPLAY_HEIGHT,
+        present: (fb) => {
+          presentedPixels = [fb.readPixel(0, 0), fb.readPixel(1, 0)];
+        },
+      });
+
+      instance.initialize();
+      instance.start();
+
+      const executed = instance.executionPump.pumpSlice(20);
+      expect(executed).toBe(11);
+      expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+
+      // Verify both pixels were modified in the framebuffer
+      expect(instance.board.displayDevice.framebuffer.readPixel(0, 0)).toBe(presentedPixels[0]);
+      expect(instance.board.displayDevice.framebuffer.readPixel(1, 0)).toBe(presentedPixels[1]);
+      expect(presentedPixels[0]).not.toBe(0x000000ff);
+      expect(presentedPixels[1]).not.toBe(0x000000ff);
+
+      instance.stop();
+    });
+
+    it('distinguishes hardware MMIO fault from runtime RUNNING when guest attempts out-of-bounds MMIO access', () => {
+      // Attempt to access unmapped physical memory address 0x95000000 (past MMIO window)
+      const bootPayload = new Uint8Array([
+        0x21, 0x00, 0xb2, 0xd2, // 0x00: MOVZ X1, #0x9001, LSL #16
+        0x20, 0x00, 0x00, 0xb9, // 0x04: STR W0, [X1, #0] -> Unmapped physical memory write
+        0x00, 0x00, 0x40, 0xd4, // 0x08: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+      instance.initialize();
+      instance.start();
+
+      const primary = instance.cpu.getPrimaryCore();
+
+      // Step 1: MOVZ X1, #0x9001, LSL #16 succeeds
+      expect(primary.step().executed).toBe(true);
+
+      // Step 2: STR W0, [X1] fails with MEMORY_FAULT
+      const stepFault = primary.step();
+      expect(stepFault.executed).toBe(false);
+      expect(stepFault.reason).toBe('MEMORY_FAULT');
+      expect(stepFault.state).toBe(Frt64CoreRunState.FAULT);
+      expect(primary.getStatus().runState).toBe(Frt64CoreRunState.FAULT);
+
+      // Lifecycle remains RUNNING even though CPU faulted
+      expect(instance.getState()).toBe(RuntimeLifecycleState.RUNNING);
+
+      instance.stop();
     });
   });
 
