@@ -9,6 +9,7 @@ import {
   createHostAccessContext,
   DEFAULT_HOST_ACCESS_CONTEXT,
   DeviceClass,
+  Frt64CoreRunState,
   Frt64ExecutionFamily,
   IDevice,
   IDeviceContext,
@@ -772,6 +773,229 @@ describe('Fabric Dessert Core Foundation', () => {
       expect(() => mem.read32(0xffff_ffff_ffff_fffdn)).toThrow(/exceeds 64-bit physical address space limit/i);
       expect(() => mem.write32(0xffff_ffff_ffff_fffdn, 0)).toThrow(/exceeds 64-bit physical address space limit/i);
       expect(() => mem.fetchInstructionBytes(0xffff_ffff_ffff_fffdn, 4)).toThrow(/exceeds 64-bit physical address space limit/i);
+    });
+  });
+
+  describe('Native JS-VM Boot Path Integration Proof', () => {
+    it('executes real AArch64 machine instructions from Boot ROM, writes to physical RAM, and halts', () => {
+      // 4-instruction AArch64 test program:
+      // Address 0x00000000: MOVZ X0, #0x1234 (0xD2824680)
+      // Address 0x00000004: MOVZ X1, #0x10, LSL #16 (0xD2A00201) -> X1 = 0x00100000 (RAM base)
+      // Address 0x00000008: STR X0, [X1] (0xF9000020) -> writes X0 to RAM at 0x00100000
+      // Address 0x0000000C: HLT #0 (0xD4400000) -> halts CPU
+      const bootPayload = new Uint8Array([
+        0x80, 0x46, 0x82, 0xd2, // 0x00: MOVZ X0, #0x1234
+        0x01, 0x02, 0xa0, 0xd2, // 0x04: MOVZ X1, #0x10, LSL #16
+        0x20, 0x00, 0x00, 0xf9, // 0x08: STR X0, [X1]
+        0x00, 0x00, 0x40, 0xd4, // 0x0C: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n, // 1 MiB
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      // Attach genuine AArch64 execution engine to CPU boundary
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+
+      // Verify item 1: The configured Boot ROM contains the supplied instruction bytes
+      expect(instance.board.bootRom.baseAddress).toBe(0x00000000n);
+      expect(instance.board.bootRom.size).toBe(0x00100000n);
+      expect(instance.board.bootRom.resetEntry).toBe(0x00000000n);
+      const romBytes = instance.memory.readBytes(0x00000000n, 16);
+      expect(romBytes).toEqual(bootPayload);
+      expect(instance.board.bootRom.read32(0x00n)).toBe(0xd2824680);
+      expect(instance.board.bootRom.read32(0x04n)).toBe(0xd2a00201);
+      expect(instance.board.bootRom.read32(0x08n)).toBe(0xf9000020);
+      expect(instance.board.bootRom.read32(0x0cn)).toBe(0xd4400000);
+
+      // Initialize runtime: transitions to READY, resets board and CPU cores
+      instance.initialize();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.READY);
+
+      // Verify item 2: The primary CPU starts at the configured reset vector
+      const primaryCore = instance.cpu.getPrimaryCore();
+      expect(primaryCore.isPrimary).toBe(true);
+      expect(primaryCore.coreId).toBe(0);
+      expect(primaryCore.pc).toBe(0x00000000n);
+      expect(primaryCore.resetVector).toBe(0x00000000n);
+      expect(primaryCore.getStatus().runState).toBe(Frt64CoreRunState.RESET);
+
+      // Secondary cores remain parked
+      for (const sec of instance.cpu.getSecondaryCores()) {
+        expect(sec.getStatus().runState).toBe(Frt64CoreRunState.PARKED);
+      }
+
+      // Verify RAM at target address 0x00100000 is initially 0
+      expect(instance.memory.read64(0x00100000n)).toBe(0n);
+
+      // Start the instance: primary core enters RUNNING
+      instance.start();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.RUNNING);
+      expect(primaryCore.getStatus().runState).toBe(Frt64CoreRunState.RUNNING);
+
+      // Verify item 3 & 8: Execute instructions via execution pump deterministically
+      const instructionsExecuted = instance.executionPump.pumpSlice(10);
+
+      // Verify item 8: Instruction count matches actual execution (4 instructions)
+      expect(instructionsExecuted).toBe(4);
+      expect(instance.executionPump.getMetrics().totalInstructionsExecuted).toBe(4);
+      expect(primaryCore.getStatus().cyclesExecuted).toBe(4n);
+
+      // Verify item 4: X0 contains 0x1234
+      expect(primaryCore.getRegister('x0')).toBe(0x1234n);
+
+      // Verify item 5: X1 contains 0x00100000 (RAM base address)
+      expect(primaryCore.getRegister('x1')).toBe(0x00100000n);
+
+      // Verify item 6: The 64-bit value read back from physical RAM at 0x00100000 equals 0x1234
+      expect(instance.memory.read64(0x00100000n)).toBe(0x1234n);
+      const ramBytes = instance.memory.readBytes(0x00100000n, 8);
+      expect(ramBytes).toEqual(new Uint8Array([0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+
+      // Verify item 7: CPU reaches HALTED after executing HLT
+      expect(primaryCore.getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+
+      // Verify item 8: Final PC matches instruction following HLT at 0x0C (PC = 0x10)
+      expect(primaryCore.pc).toBe(0x00000010n);
+
+      // Verify item 9: No unexpected memory fault, invalid instruction, or unsupported instruction occurred
+      expect(primaryCore.getStatus().runState).not.toBe(Frt64CoreRunState.FAULT);
+
+      // Further pump slices do not execute any further instructions since core is HALTED
+      const extraPump = instance.executionPump.pumpSlice(10);
+      expect(extraPump).toBe(0);
+      expect(primaryCore.pc).toBe(0x00000010n);
+
+      // Clean up resources cleanly
+      instance.stop();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.STOPPED);
+    });
+
+    it('verifies instruction-by-instruction execution order and register evolution from Boot ROM to physical RAM', () => {
+      const bootPayload = new Uint8Array([
+        0x80, 0x46, 0x82, 0xd2, // 0x00: MOVZ X0, #0x1234
+        0x01, 0x02, 0xa0, 0xd2, // 0x04: MOVZ X1, #0x10, LSL #16
+        0x20, 0x00, 0x00, 0xf9, // 0x08: STR X0, [X1]
+        0x00, 0x00, 0x40, 0xd4, // 0x0C: HLT #0
+      ]);
+
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+          initialPayload: bootPayload,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+      instance.initialize();
+      instance.start();
+
+      const primary = instance.cpu.getPrimaryCore();
+
+      // Step 1: MOVZ X0, #0x1234 at 0x00
+      expect(primary.pc).toBe(0x00000000n);
+      const step1 = primary.step();
+      expect(step1.executed).toBe(true);
+      expect(step1.reason).toBe('OK');
+      expect(step1.disassembly).toContain('movz');
+      expect(primary.pc).toBe(0x00000004n);
+      expect(primary.getRegister('x0')).toBe(0x1234n);
+      expect(primary.getRegister('x1')).toBe(0n);
+      expect(instance.memory.read64(0x00100000n)).toBe(0n);
+
+      // Step 2: MOVZ X1, #0x10, LSL #16 at 0x04
+      const step2 = primary.step();
+      expect(step2.executed).toBe(true);
+      expect(step2.reason).toBe('OK');
+      expect(step2.disassembly).toContain('movz');
+      expect(primary.pc).toBe(0x00000008n);
+      expect(primary.getRegister('x0')).toBe(0x1234n);
+      expect(primary.getRegister('x1')).toBe(0x00100000n);
+      expect(instance.memory.read64(0x00100000n)).toBe(0n);
+
+      // Step 3: STR X0, [X1] at 0x08
+      const step3 = primary.step();
+      expect(step3.executed).toBe(true);
+      expect(step3.reason).toBe('OK');
+      expect(step3.disassembly).toContain('str');
+      expect(primary.pc).toBe(0x0000000cn);
+      // Memory at 0x00100000 now contains 0x1234
+      expect(instance.memory.read64(0x00100000n)).toBe(0x1234n);
+
+      // Step 4: HLT #0 at 0x0C
+      const step4 = primary.step();
+      expect(step4.executed).toBe(true);
+      expect(step4.state).toBe(Frt64CoreRunState.HALTED);
+      expect(step4.reason).toBe('HALTED');
+      expect(step4.disassembly).toContain('hlt');
+      expect(primary.pc).toBe(0x00000010n);
+      expect(primary.getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+
+      // Step 5: Post-halt step does not execute
+      const step5 = primary.step();
+      expect(step5.executed).toBe(false);
+      expect(step5.reason).toBe('HALTED');
+      expect(primary.pc).toBe(0x00000010n);
+
+      instance.stop();
+    });
+
+    it('honestly reports CPU fault on empty Boot ROM and distinguishes CPU FAULT from runtime RUNNING', () => {
+      // Construct instance with empty Boot ROM (no initialPayload)
+      const instance = createFabricDessertInstance({
+        bootContract: {
+          bootRomBase: 0x00000000n,
+          bootRomSizeBytes: 0x00100000n,
+          resetVector: 0x00000000n,
+        },
+      });
+
+      instance.attachExecutionEngine(Frt64ExecutionFamily.ARM_64);
+      instance.initialize();
+
+      // Boot ROM reads zero at reset vector
+      expect(instance.board.bootRom.read32(0x00n)).toBe(0);
+      expect(instance.memory.read32(0x00n)).toBe(0);
+
+      // Start runtime lifecycle: instance enters RUNNING
+      instance.start();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.RUNNING);
+
+      const primary = instance.cpu.getPrimaryCore();
+      expect(primary.getStatus().runState).toBe(Frt64CoreRunState.RUNNING);
+
+      // Pump slice attempts to execute the all-zero machine word (opcode 0x00000000)
+      const count = instance.executionPump.pumpSlice(10);
+      expect(count).toBe(0); // Zero instructions succeeded
+
+      // Primary CPU core must enter FAULT state due to invalid instruction
+      const status = primary.getStatus();
+      expect(status.runState).toBe(Frt64CoreRunState.FAULT);
+      expect(primary.pc).toBe(0x00000000n);
+
+      // Confirm step-level diagnostic confirms INVALID_INSTRUCTION on opcode 0x00000000
+      primary.reset(0x00000000n);
+      const stepResult = primary.step();
+      expect(stepResult.executed).toBe(false);
+      expect(stepResult.reason).toBe('INVALID_INSTRUCTION');
+      expect(stepResult.state).toBe(Frt64CoreRunState.FAULT);
+      expect(stepResult.fault).toContain('Undefined or unsupported AArch64 opcode 0x00000000');
+
+      // Crucially: CPU state is FAULT while the runtime lifecycle state remains RUNNING
+      // Demonstrates that RuntimeLifecycleState.RUNNING does NOT imply successful firmware execution
+      expect(instance.getState()).toBe(RuntimeLifecycleState.RUNNING);
+      expect(primary.getStatus().runState).toBe(Frt64CoreRunState.FAULT);
+
+      // Clean up resources cleanly
+      instance.stop();
+      expect(instance.getState()).toBe(RuntimeLifecycleState.STOPPED);
     });
   });
 
