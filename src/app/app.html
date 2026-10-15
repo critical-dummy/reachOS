@@ -136,51 +136,6 @@
           <!-- Subtle divider -->
           <div class="w-4 h-px bg-white/10 my-0.5"></div>
 
-          <!-- QEMU Runtime Capability & Diagnostic Button -->
-          <button
-            type="button"
-            (click)="toggleDiagnostics()"
-            class="w-7 h-7 rounded-full flex items-center justify-center text-white/70 hover:text-white transition-colors cursor-pointer relative"
-            [title]="diagnosticTitle()"
-            aria-label="QEMU runtime diagnostics"
-          >
-            <!-- Lucide: cpu -->
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="256"
-              height="256"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="w-[15px] h-[15px]"
-              aria-hidden="true"
-            >
-              <rect width="16" height="16" x="4" y="4" rx="2" />
-              <rect width="6" height="6" x="9" y="9" rx="1" />
-              <path d="M15 2v2" />
-              <path d="M15 20v2" />
-              <path d="M2 15h2" />
-              <path d="M2 9h2" />
-              <path d="M20 15h2" />
-              <path d="M20 9h2" />
-              <path d="M9 2v2" />
-              <path d="M9 20v2" />
-            </svg>
-
-            <!-- Status indicator dot: emerald if fully capable, amber if limitations exist -->
-            <span
-              class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full"
-              [class.bg-emerald-400]="isFullyCapable()"
-              [class.bg-amber-400]="!isFullyCapable()"
-            ></span>
-          </button>
-
-          <!-- Subtle divider -->
-          <div class="w-4 h-px bg-white/10 my-0.5"></div>
-
           <!-- Vertical state label (rotated 90deg, bottom faces left toward display) -->
           <div class="h-14 flex items-center justify-center">
             <span class="whitespace-nowrap select-none font-inter rotate-90 origin-center text-[10px] font-medium tracking-widest text-neutral-400 uppercase pointer-events-none">
@@ -188,82 +143,6 @@
             </span>
           </div>
         </div>
-
-        <!-- Compact Diagnostic Popover (Non-destructive, shown only when clicked) -->
-        @if (showDiagnostics()) {
-          <div
-            class="absolute left-[calc(100%+12px)] top-0 w-72 p-3.5 rounded-2xl border border-white/10 bg-neutral-950/95 backdrop-blur-xl shadow-2xl text-neutral-300 font-inter text-xs select-text z-50 flex flex-col gap-2.5 pointer-events-auto"
-            role="dialog"
-            aria-label="QEMU-WASM Runtime Diagnostics"
-          >
-            <div class="flex items-center justify-between border-b border-white/10 pb-2">
-              <span class="font-semibold text-white tracking-wide text-xs">Runtime Diagnostics</span>
-              <button
-                type="button"
-                (click)="toggleDiagnostics()"
-                class="text-neutral-400 hover:text-white text-xs cursor-pointer px-1 leading-none"
-                aria-label="Close diagnostics"
-              >✕</button>
-            </div>
-
-            <!-- Capabilities list -->
-            <div class="flex flex-col gap-1.5 text-[11px]">
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">WebAssembly API:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().hasWebAssembly" [class.text-rose-400]="!qemuCapabilities().hasWebAssembly">
-                  {{ qemuCapabilities().hasWebAssembly ? 'Available' : 'Unavailable' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">WebAssembly.validate:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().hasWasmValidate" [class.text-rose-400]="!qemuCapabilities().hasWasmValidate">
-                  {{ qemuCapabilities().hasWasmValidate ? 'Available' : 'Unavailable' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">SharedArrayBuffer:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().hasSharedArrayBuffer" [class.text-rose-400]="!qemuCapabilities().hasSharedArrayBuffer">
-                  {{ qemuCapabilities().hasSharedArrayBuffer ? 'Available' : 'Unavailable' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">Cross-Origin Isolated:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().isCrossOriginIsolated" [class.text-amber-400]="!qemuCapabilities().isCrossOriginIsolated">
-                  {{ qemuCapabilities().isCrossOriginIsolated ? 'Yes (Isolated)' : 'No (Restricted)' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">Web Worker:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().hasWebWorker" [class.text-rose-400]="!qemuCapabilities().hasWebWorker">
-                  {{ qemuCapabilities().hasWebWorker ? 'Available' : 'Unavailable' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">Multithreaded QEMU:</span>
-                <span [class.text-emerald-400]="qemuCapabilities().multithreadedWasmSupported" [class.text-amber-400]="!qemuCapabilities().multithreadedWasmSupported">
-                  {{ qemuCapabilities().multithreadedWasmSupported ? 'Supported' : 'Blocked' }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between border-t border-white/5 pt-1.5">
-                <span class="text-neutral-400">Server Assets:</span>
-                <span class="text-neutral-300 font-mono text-[10px]">
-                  {{ qemuServerStatus() ? qemuServerStatus()!.status : (qemuServerError() ? 'Failed to query' : 'Checking...') }}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-neutral-400">Linux Guest Boot:</span>
-                <span class="text-neutral-400 font-mono text-[10px]">Not Verified</span>
-              </div>
-            </div>
-
-            <!-- Actionable guidance if limitations exist -->
-            @if (qemuCapabilities().recommendedAction) {
-              <div class="rounded-lg bg-amber-500/10 border border-amber-500/20 p-2 text-[10px] text-amber-200/90 leading-relaxed">
-                {{ qemuCapabilities().recommendedAction }}
-              </div>
-            }
-          </div>
-        }
 
         <!-- Mobile 1:1 Square Keyboard Button (rendered ONLY on supported mobile input environments) -->
         @if (showMobileKeyboard()) {
