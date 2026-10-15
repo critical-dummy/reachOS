@@ -13,7 +13,6 @@ import {MatIconModule} from '@angular/material/icon';
 import {RuntimeLifecycleState} from '../fabric-dessert';
 import {FabricDessertHost} from './fabric-dessert-host';
 import {FabricDessertInputBridge} from './input-bridge';
-import {QemuStatusClient} from './qemu/qemu-status-client';
 
 @Component({
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -25,7 +24,6 @@ import {QemuStatusClient} from './qemu/qemu-status-client';
 export class App {
   protected readonly host = inject(FabricDessertHost);
   protected readonly inputBridge = inject(FabricDessertInputBridge);
-  protected readonly qemuClient = inject(QemuStatusClient);
   private readonly destroyRef = inject(DestroyRef);
 
   protected readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('displayCanvas');
@@ -33,20 +31,6 @@ export class App {
 
   protected readonly hasSideSpace = signal(false);
   protected readonly showMobileKeyboard = signal(false);
-  protected readonly showDiagnostics = signal(false);
-
-  protected readonly qemuCapabilities = computed(() => this.qemuClient.capabilities());
-  protected readonly qemuServerStatus = computed(() => this.qemuClient.serverStatus());
-  protected readonly qemuServerError = computed(() => this.qemuClient.serverError());
-  protected readonly isFullyCapable = computed(() => this.qemuClient.isFullyCapable());
-
-  protected readonly diagnosticTitle = computed(() => {
-    const caps = this.qemuCapabilities();
-    if (caps.multithreadedWasmSupported) {
-      return 'QEMU Runtime Diagnostics: Browser environment ready for multithreaded Wasm';
-    }
-    return `QEMU Runtime Diagnostics: ${caps.limitations[0] ?? 'Limitations detected'}`;
-  });
 
   protected readonly isRunning = computed(
     () => this.host.state() === RuntimeLifecycleState.RUNNING
@@ -86,9 +70,6 @@ export class App {
       if (canvasEl instanceof HTMLCanvasElement) {
         this.host.attachCanvas(canvasEl);
       }
-
-      this.qemuClient.refreshCapabilities();
-      void this.qemuClient.fetchServerStatus();
 
       this.showMobileKeyboard.set(this.checkMobileInputSupport());
       this.updateSideSpace();
@@ -153,10 +134,6 @@ export class App {
 
   protected togglePower(): void {
     this.host.powerToggle();
-  }
-
-  protected toggleDiagnostics(): void {
-    this.showDiagnostics.update((v) => !v);
   }
 
   protected togglePlayPause(): void {
