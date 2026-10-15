@@ -111,9 +111,7 @@ export class FabricDessertBoard implements IFabricDessertBoard {
 
     // 8. Connect DeviceBus interrupt routing to CPU boundary
     this.deviceBus.addInterruptListener((vector: number, level: boolean) => {
-      if (level) {
-        this.cpuBoundary.signalGlobalInterrupt(vector);
-      }
+      this.cpuBoundary.signalGlobalInterrupt(vector, level);
     });
   }
 

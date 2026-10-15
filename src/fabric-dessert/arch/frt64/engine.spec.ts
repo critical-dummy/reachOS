@@ -19,6 +19,8 @@ import {SparsePhysicalMemoryRegion} from '../../memory/physical-memory';
 import {MemoryRegionType} from '../../memory/types';
 import {createFabricDessertInstance} from '../../runtime/instance';
 import {ExecutionPump} from '../../runtime/execution-pump';
+import {DeviceBus} from '../../device/bus';
+import {DeviceClass, IDevice, IDeviceContext} from '../../device/types';
 
 describe('FRT64 Virtual CPU Execution Engine', () => {
   let addressSpace: PhysicalAddressSpace;
@@ -717,6 +719,338 @@ describe('FRT64 Virtual CPU Execution Engine', () => {
       const executed = instance.executionPump.pumpSlice(10);
       expect(executed).toBe(3); // 2 NOPs + 1 HLT
       expect(instance.cpu.getPrimaryCore().getStatus().runState).toBe(Frt64CoreRunState.HALTED);
+    });
+  });
+
+  describe('9. Event Register, WFE/WFI, and Interrupt Wakeup Mechanics', () => {
+    it('1. WFE with a clear Event Register enters a genuine wait state', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x5f, 0x20, 0x03, 0xd5])); // wfe
+      expect(engine.eventRegister).toBe(false);
+
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(step1.state).toBe(Frt64CoreRunState.WAITING);
+      expect(step1.reason).toBe('WAITING_WFE');
+      expect(step1.waitReason).toBe('WFE');
+      expect(engine.state).toBe(Frt64CoreRunState.WAITING);
+      expect(engine.waitReason).toBe('WFE');
+      expect(engine.pc).toBe(0x1004n);
+
+      // Subsequent step while waiting does not execute or advance PC
+      const step2 = engine.step();
+      expect(step2.executed).toBe(false);
+      expect(step2.state).toBe(Frt64CoreRunState.WAITING);
+      expect(step2.reason).toBe('WAITING_WFE');
+      expect(engine.pc).toBe(0x1004n);
+      expect(engine.cyclesExecuted).toBe(1n);
+    });
+
+    it('2. WFE with a set Event Register clears it and continues immediately', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x5f, 0x20, 0x03, 0xd5])); // wfe
+      engine.setEventRegister(true);
+      expect(engine.eventRegister).toBe(true);
+
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(step1.state).toBe(Frt64CoreRunState.RUNNING);
+      expect(step1.reason).toBe('OK');
+      expect(engine.eventRegister).toBe(false); // Event register is cleared
+      expect(engine.waitReason).toBeUndefined();
+      expect(engine.pc).toBe(0x1004n);
+    });
+
+    it('3. SEVL primes the local core and wakes it correctly', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      // sevl followed by wfe
+      busMaster.writePhysical(0x1000n, new Uint8Array([
+        0xbf, 0x20, 0x03, 0xd5, // sevl
+        0x5f, 0x20, 0x03, 0xd5, // wfe
+      ]));
+
+      const step1 = engine.step(); // executes SEVL
+      expect(step1.executed).toBe(true);
+      expect(engine.eventRegister).toBe(true);
+      expect(engine.pc).toBe(0x1004n);
+
+      const step2 = engine.step(); // executes WFE with Event Register set
+      expect(step2.executed).toBe(true);
+      expect(step2.state).toBe(Frt64CoreRunState.RUNNING);
+      expect(engine.eventRegister).toBe(false); // Cleared by WFE
+      expect(engine.pc).toBe(0x1008n);
+    });
+
+    it('4. SEV signals all cores, including another core waiting in WFE', () => {
+      const cpu = new Frt64CpuBoundary({
+        coreCount: 2,
+        defaultFamily: Frt64ExecutionFamily.ARM_64,
+        defaultResetVector: 0x1000n,
+      });
+      cpu.attachBusMaster(busMaster);
+      cpu.attachExecutionEngine();
+
+      const core0 = cpu.getPrimaryCore();
+      const core1 = cpu.getCore(1)!;
+
+      // Core 1 unparks at 0x2000 where WFE is located
+      busMaster.writePhysical(0x2000n, new Uint8Array([0x5f, 0x20, 0x03, 0xd5])); // wfe
+      cpu.releaseSecondaryCore(1, 0x2000n);
+      const stepWait = core1.step();
+      expect(stepWait.state).toBe(Frt64CoreRunState.WAITING);
+      expect(stepWait.reason).toBe('WAITING_WFE');
+      expect(core1.getStatus().runState).toBe(Frt64CoreRunState.WAITING);
+
+      // Core 0 executes SEV at 0x1000
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x9f, 0x20, 0x03, 0xd5])); // sev
+      const stepSev = core0.step();
+      expect(stepSev.executed).toBe(true);
+      expect(core0.getStatus().eventRegister).toBe(true);
+
+      // Core 1 must have been awakened by SEV broadcast!
+      expect(core1.getStatus().runState).toBe(Frt64CoreRunState.RUNNING);
+      expect(core1.getStatus().eventRegister).toBe(true);
+      expect(core1.getStatus().waitReason).toBeUndefined();
+    });
+
+    it('5. WFI waits when no applicable interrupt is pending', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x7f, 0x20, 0x03, 0xd5])); // wfi
+
+      const step1 = engine.step();
+      expect(step1.executed).toBe(true);
+      expect(step1.state).toBe(Frt64CoreRunState.WAITING);
+      expect(step1.reason).toBe('WAITING_WFI');
+      expect(step1.waitReason).toBe('WFI');
+      expect(engine.state).toBe(Frt64CoreRunState.WAITING);
+      expect(engine.waitReason).toBe('WFI');
+      expect(engine.pc).toBe(0x1004n);
+
+      // Second step does not advance PC while waiting
+      const step2 = engine.step();
+      expect(step2.executed).toBe(false);
+      expect(step2.state).toBe(Frt64CoreRunState.WAITING);
+      expect(engine.pc).toBe(0x1004n);
+    });
+
+    it('6. An already-asserted IRQ is handled correctly when WFI executes', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x7f, 0x20, 0x03, 0xd5])); // wfi
+
+      // Signal IRQ vector 16 before executing WFI
+      engine.signalInterrupt(16, true);
+      expect(engine.hasPendingInterrupt()).toBe(true);
+
+      const step = engine.step();
+      expect(step.executed).toBe(true);
+      expect(step.state).toBe(Frt64CoreRunState.RUNNING);
+      expect(step.reason).toBe('OK');
+      expect(engine.state).toBe(Frt64CoreRunState.RUNNING);
+      expect(engine.pc).toBe(0x1004n);
+    });
+
+    it('7. An IRQ asserted while the core waits wakes it without incorrectly changing its PC', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([
+        0x7f, 0x20, 0x03, 0xd5, // wfi
+        0x1f, 0x20, 0x03, 0xd5, // nop
+      ]));
+
+      engine.step(); // Enters WFI
+      expect(engine.state).toBe(Frt64CoreRunState.WAITING);
+      expect(engine.pc).toBe(0x1004n);
+
+      // Assert IRQ line 16
+      engine.signalInterrupt(16, true);
+
+      // Woken core must be RUNNING and its PC must NOT be corrupted or vector-redirected
+      expect(engine.state).toBe(Frt64CoreRunState.RUNNING);
+      expect(engine.waitReason).toBeUndefined();
+      expect(engine.pc).toBe(0x1004n); // PC remains precisely at the instruction following WFI
+
+      // Next step successfully executes the NOP at 0x1004n
+      const stepNop = engine.step();
+      expect(stepNop.executed).toBe(true);
+      expect(engine.pc).toBe(0x1008n);
+    });
+
+    it('8. IRQ deassertion clears the relevant level state', () => {
+      const bus = new DeviceBus(
+        {mmioWindowBase: 0x10000000n, mmioWindowSize: 0x1000000n},
+        addressSpace
+      );
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x7f, 0x20, 0x03, 0xd5])); // wfi
+
+      // Assert IRQ
+      bus.dispatchInterrupt(16, true);
+      engine.signalInterrupt(16, true);
+      expect(bus.isIrqAsserted(16)).toBe(true);
+      expect(engine.hasPendingInterrupt()).toBe(true);
+
+      // Deassert IRQ
+      bus.dispatchInterrupt(16, false);
+      engine.signalInterrupt(16, false);
+      expect(bus.isIrqAsserted(16)).toBe(false);
+      expect(engine.hasPendingInterrupt()).toBe(false);
+
+      // Now executing WFI should enter WAITING state because the level was cleared
+      const step = engine.step();
+      expect(step.state).toBe(Frt64CoreRunState.WAITING);
+      expect(step.reason).toBe('WAITING_WFI');
+    });
+
+    it('9. Device-local IRQ lines map correctly to assigned bus vectors', () => {
+      const bus = new DeviceBus(
+        {mmioWindowBase: 0x10000000n, mmioWindowSize: 0x1000000n},
+        addressSpace
+      );
+
+      let capturedVector: number | undefined;
+      let capturedLevel: boolean | undefined;
+      bus.addInterruptListener((vector, level) => {
+        capturedVector = vector;
+        capturedLevel = level;
+      });
+
+      let deviceCtx!: IDeviceContext;
+      const testDevice: IDevice = {
+        id: 'test_dev0',
+        name: 'Test Device with 2 IRQs',
+        deviceClass: DeviceClass.GENERIC,
+        irqCount: 2,
+        mmioRequests: [],
+        initialize: (ctx) => { deviceCtx = ctx; },
+        reset: () => {
+          void 0;
+        },
+        terminate: () => {
+          void 0;
+        },
+      };
+
+      const record = bus.registerDevice(testDevice);
+      expect(record.assignedIrqs).toEqual([16, 17]);
+
+      // Raise local line 0 -> maps to assigned vector 16
+      deviceCtx.raiseInterrupt(0);
+      expect(capturedVector).toBe(16);
+      expect(capturedLevel).toBe(true);
+      expect(bus.isIrqAsserted(16)).toBe(true);
+
+      // Lower local line 0
+      deviceCtx.lowerInterrupt(0);
+      expect(capturedVector).toBe(16);
+      expect(capturedLevel).toBe(false);
+      expect(bus.isIrqAsserted(16)).toBe(false);
+
+      // Raise local line 1 -> maps to assigned vector 17
+      deviceCtx.raiseInterrupt(1);
+      expect(capturedVector).toBe(17);
+      expect(capturedLevel).toBe(true);
+      expect(bus.isIrqAsserted(17)).toBe(true);
+
+      // Out of bounds local line index -> throws Error
+      expect(() => deviceCtx.raiseInterrupt(2)).toThrow(/invalid IRQ line 2/);
+      expect(() => deviceCtx.lowerInterrupt(-1)).toThrow(/invalid IRQ line -1/);
+    });
+
+    it('10. The execution pump resumes after an event or IRQ and does not resume while paused or stopped', () => {
+      const cpu = new Frt64CpuBoundary({
+        coreCount: 1,
+        defaultFamily: Frt64ExecutionFamily.ARM_64,
+        defaultResetVector: 0x1000n,
+      });
+      cpu.attachBusMaster(busMaster);
+      cpu.attachExecutionEngine();
+
+      // Write WFI followed by NOP
+      busMaster.writePhysical(0x1000n, new Uint8Array([
+        0x7f, 0x20, 0x03, 0xd5, // wfi
+        0x1f, 0x20, 0x03, 0xd5, // nop
+      ]));
+
+      const pump = new ExecutionPump(cpu, {sliceIntervalMs: 5});
+      pump.start();
+
+      // Slice executes WFI and stops scheduling because core entered WAITING
+      pump.pumpSlice(1);
+      expect(cpu.getPrimaryCore().getStatus().runState).toBe(Frt64CoreRunState.WAITING);
+
+      // While core is waiting, signal IRQ -> wakes core and resumes pump scheduling
+      cpu.signalGlobalInterrupt(16, true);
+      expect(cpu.getPrimaryCore().getStatus().runState).toBe(Frt64CoreRunState.RUNNING);
+
+      // Pump can execute next slice now that core is awake
+      const instructions = pump.pumpSlice(1);
+      expect(instructions).toBe(1);
+      expect(cpu.getPrimaryCore().pc).toBe(0x1008n); // WFI (4) + NOP (4) = 8
+
+      // Test that pump does NOT resume when paused
+      pump.pause();
+      cpu.getPrimaryCore().step();
+      cpu.signalGlobalInterrupt(16, true);
+      expect(pump.isRunning()).toBe(false); // Still paused
+
+      // Test that pump does NOT resume when stopped
+      pump.stop();
+      cpu.signalGlobalInterrupt(16, true);
+      expect(pump.isRunning()).toBe(false); // Still stopped
+    });
+
+    it('11. Reset clears event and waiting state across cores', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x5f, 0x20, 0x03, 0xd5])); // wfe
+      engine.step(); // Enters WAITING (WFE)
+      expect(engine.state).toBe(Frt64CoreRunState.WAITING);
+      expect(engine.waitReason).toBe('WFE');
+
+      // Set event register while waiting
+      engine.setEventRegister(true);
+      expect(engine.eventRegister).toBe(true);
+
+      // Reset clears waiting state, wait reason, and event register
+      engine.reset(0x1000n);
+      expect(engine.state).toBe(Frt64CoreRunState.RESET);
+      expect(engine.eventRegister).toBe(false);
+      expect(engine.waitReason).toBeUndefined();
+
+      // Reset also clears pending interrupts
+      engine.signalInterrupt(16, true);
+      expect(engine.hasPendingInterrupt()).toBe(true);
+      engine.reset(0x1000n);
+      expect(engine.hasPendingInterrupt()).toBe(false);
+    });
+  });
+
+  describe('10. Fault Classification (Instruction vs Memory)', () => {
+    it('distinguishes invalid instruction, unsupported instruction, and memory faults', () => {
+      const engine = new AArch64ExecutionEngine(0, busMaster, accessContext, 0x1000n);
+
+      // A. Unallocated opcode -> INVALID_INSTRUCTION
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x00, 0x00, 0x00, 0x00]));
+      const resInvalid = engine.step();
+      expect(resInvalid.executed).toBe(false);
+      expect(resInvalid.reason).toBe('INVALID_INSTRUCTION');
+      expect(resInvalid.state).toBe(Frt64CoreRunState.FAULT);
+
+      // B. Reserved imm6 on 32-bit shifted register -> INVALID_INSTRUCTION
+      engine.reset(0x1000n);
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x02, 0x80, 0x01, 0x0a])); // imm6 = 32
+      const resReserved = engine.step();
+      expect(resReserved.executed).toBe(false);
+      expect(resReserved.reason).toBe('INVALID_INSTRUCTION');
+      expect(resReserved.state).toBe(Frt64CoreRunState.FAULT);
+
+      // C. Memory fault on store outside mapped physical memory
+      engine.reset(0x1000n);
+      engine.setRegister('x0', 0xfffffffffffffff0n); // Unmapped high physical address
+      // str w1, [x0] (0xb9000001: size=2, opc=0, imm12=0, rn=0, rt=1)
+      busMaster.writePhysical(0x1000n, new Uint8Array([0x01, 0x00, 0x00, 0xb9]));
+      const resMem = engine.step();
+      expect(resMem.executed).toBe(false);
+      expect(resMem.reason).toBe('MEMORY_FAULT');
+      expect(resMem.state).toBe(Frt64CoreRunState.FAULT);
     });
   });
 });

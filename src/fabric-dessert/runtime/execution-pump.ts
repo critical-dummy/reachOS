@@ -56,6 +56,7 @@ export class ExecutionPump implements IExecutionPump {
   private totalInstructions = 0;
   private totalCycles = 0n;
   private slicesPumped = 0;
+  private readonly unsubscribeWakeListener?: () => void;
 
   constructor(cpu: IFrt64CpuBoundary, options?: ExecutionPumpOptions) {
     this.cpu = cpu;
@@ -64,6 +65,13 @@ export class ExecutionPump implements IExecutionPump {
     this.onSliceExecuted = options?.onSliceExecuted;
     this.onCoreHalted = options?.onCoreHalted;
     this.onCoreFault = options?.onCoreFault;
+
+    // Connect wake listener so WFE/WFI wakeups and IRQs schedule execution again
+    if (this.cpu && 'addWakeListener' in this.cpu) {
+      this.unsubscribeWakeListener = this.cpu.addWakeListener(() => {
+        this.onCpuWake();
+      });
+    }
   }
 
   isRunning(): boolean {
@@ -154,10 +162,24 @@ export class ExecutionPump implements IExecutionPump {
     return sliceInstructions;
   }
 
+  private onCpuWake(): void {
+    // Paused and stopped pumps must not resume accidentally because of an IRQ or event
+    if (!this.active || this.paused) {
+      return;
+    }
+    this.scheduleNextSlice();
+  }
+
   private scheduleNextSlice(): void {
     if (!this.active || this.paused) return;
+    // Avoid duplicate timers or animation frames when several events arrive
+    if (this.timerHandle !== null || this.rafHandle !== null) {
+      return;
+    }
 
     const run = () => {
+      this.timerHandle = null;
+      this.rafHandle = null;
       if (!this.active || this.paused) return;
       this.pumpSlice();
 

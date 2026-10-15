@@ -28,6 +28,8 @@ export interface IDeviceBus {
   terminateAllDevices(): void;
   addInterruptListener(listener: InterruptListener): () => void;
   dispatchInterrupt(vector: number, level: boolean): void;
+  isIrqAsserted(vector: number): boolean;
+  getAssertedIrqVectors(): readonly number[];
 }
 
 export class DeviceBus implements IDeviceBus {
@@ -37,6 +39,7 @@ export class DeviceBus implements IDeviceBus {
   private nextFreeMmioAddress: Address64;
   private readonly devices = new Map<string, DeviceRegistrationRecord>();
   private readonly interruptListeners = new Set<InterruptListener>();
+  private readonly assertedIrqVectors = new Set<number>();
   private nextIrqVector = 16; // Standard user IRQs starting at vector 16
 
   constructor(config: IDeviceBusConfig, addressSpace: IPhysicalAddressSpace) {
@@ -117,10 +120,22 @@ export class DeviceBus implements IDeviceBus {
       writePhysical: (address: Address64, data: Uint8Array) => {
         this.addressSpace.writeBytes(address, data, deviceAccessContext);
       },
-      raiseInterrupt: (vector: number) => {
+      raiseInterrupt: (line: number) => {
+        if (line < 0 || line >= assignedIrqs.length) {
+          throw new Error(
+            `Device "${device.id}" raised invalid IRQ line ${line}. Allocated IRQs: ${assignedIrqs.length}.`
+          );
+        }
+        const vector = assignedIrqs[line];
         this.dispatchInterrupt(vector, true);
       },
-      lowerInterrupt: (vector: number) => {
+      lowerInterrupt: (line: number) => {
+        if (line < 0 || line >= assignedIrqs.length) {
+          throw new Error(
+            `Device "${device.id}" lowered invalid IRQ line ${line}. Allocated IRQs: ${assignedIrqs.length}.`
+          );
+        }
+        const vector = assignedIrqs[line];
         this.dispatchInterrupt(vector, false);
       },
     };
@@ -161,12 +176,14 @@ export class DeviceBus implements IDeviceBus {
   }
 
   resetAllDevices(): void {
+    this.assertedIrqVectors.clear();
     for (const record of this.devices.values()) {
       record.device.reset();
     }
   }
 
   terminateAllDevices(): void {
+    this.assertedIrqVectors.clear();
     for (const record of this.devices.values()) {
       record.device.terminate();
     }
@@ -180,7 +197,20 @@ export class DeviceBus implements IDeviceBus {
     };
   }
 
+  isIrqAsserted(vector: number): boolean {
+    return this.assertedIrqVectors.has(vector);
+  }
+
+  getAssertedIrqVectors(): readonly number[] {
+    return Array.from(this.assertedIrqVectors);
+  }
+
   dispatchInterrupt(vector: number, level: boolean): void {
+    if (level) {
+      this.assertedIrqVectors.add(vector);
+    } else {
+      this.assertedIrqVectors.delete(vector);
+    }
     for (const listener of this.interruptListeners) {
       listener(vector, level);
     }

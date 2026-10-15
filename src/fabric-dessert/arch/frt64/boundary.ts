@@ -5,6 +5,7 @@ import {
   Frt64CoreStatus,
   Frt64ExecutionFamily,
   Frt64TopologyConfig,
+  Frt64WaitReason,
   InstructionFetchResult,
 } from './types';
 import {Address64, assertValidAddress64} from '../../types';
@@ -32,6 +33,8 @@ export interface IFrt64CoreBoundary {
   readonly pc: Address64;
   readonly resetVector: Address64;
   readonly accessContext: CpuAccessContext;
+  readonly eventRegister: boolean;
+  readonly waitReason?: Frt64WaitReason;
   getStatus(): Frt64CoreStatus;
   getActiveFamily(): Frt64ExecutionFamily;
   switchExecutionFamily(targetFamily: Frt64ExecutionFamily): boolean;
@@ -48,7 +51,10 @@ export interface IFrt64CoreBoundary {
   resume(): void;
   park(): void;
   unpark(entryVector?: Address64): boolean;
-  signalInterrupt(irqVector: number): void;
+  signalInterrupt(irqVector: number, level?: boolean): void;
+  signalEvent(): void;
+  wake(): void;
+  setEventRegister(value: boolean): void;
   readPhysical(address: Address64, sizeBytes: number): Uint8Array;
   writePhysical(address: Address64, data: Uint8Array): void;
   fetchInstructionBytes(sizeBytes: number): InstructionFetchResult;
@@ -74,7 +80,9 @@ export interface IFrt64CpuBoundary {
   resumePrimary(): void;
   resumeAll(): void;
   releaseSecondaryCore(coreId: number, entryVector?: Address64): boolean;
-  signalGlobalInterrupt(irqVector: number): void;
+  signalGlobalInterrupt(irqVector: number, level?: boolean): void;
+  broadcastEvent(sourceCoreId: number, broadcast: boolean): void;
+  addWakeListener(listener: () => void): () => void;
 }
 
 export class Frt64CoreBoundary implements IFrt64CoreBoundary {
@@ -90,6 +98,11 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   private executionEngine: IFrt64ExecutionEngine | null = null;
   private readonly autoAttachEngine: boolean;
   protected busMaster: IFrt64BusMaster | null = null;
+
+  private waitReasonState?: Frt64WaitReason;
+  private readonly pendingIrqs = new Set<number>();
+  private eventBroadcaster?: (broadcast: boolean) => void;
+  private wakeCallback?: () => void;
 
   constructor(config: Frt64CoreConfig & {autoAttachEngine?: boolean}) {
     this.coreId = config.coreId;
@@ -113,10 +126,44 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     return this.currentResetVector;
   }
 
+  get eventRegister(): boolean {
+    if (this.executionEngine) {
+      return this.executionEngine.getEventRegister?.() ?? false;
+    }
+    return false;
+  }
+
+  get waitReason(): Frt64WaitReason | undefined {
+    if (this.executionEngine) {
+      return this.executionEngine.getWaitReason?.() ?? this.waitReasonState;
+    }
+    return this.waitReasonState;
+  }
+
+  setEventBroadcaster(broadcaster: (broadcast: boolean) => void): void {
+    this.eventBroadcaster = broadcaster;
+    if (this.executionEngine) {
+      this.executionEngine.setEventSignaler?.(broadcaster);
+    }
+  }
+
+  setWakeCallback(cb: () => void): void {
+    this.wakeCallback = cb;
+    if (this.executionEngine) {
+      this.executionEngine.setWakeNotifier?.(cb);
+    }
+  }
+
   attachExecutionEngine(engine: IFrt64ExecutionEngine | null): void {
     this.executionEngine = engine;
     if (engine) {
       engine.setProgramCounter(this.currentPc);
+      if (this.eventBroadcaster) {
+        engine.setEventSignaler?.(this.eventBroadcaster);
+      }
+      if (this.wakeCallback) {
+        engine.setWakeNotifier?.(this.wakeCallback);
+      }
     }
   }
 
@@ -151,6 +198,9 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
   }
 
   getStatus(): Frt64CoreStatus {
+    const engineEventReg = this.executionEngine?.getEventRegister?.() ?? false;
+    const engineWaitReason = this.executionEngine?.getWaitReason?.() ?? this.waitReasonState;
+
     return {
       coreId: this.coreId,
       isPrimary: this.isPrimary,
@@ -160,6 +210,8 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       pc: this.currentPc,
       resetVector: this.currentResetVector,
       hasEngine: this.executionEngine !== null,
+      waitReason: this.runState === Frt64CoreRunState.WAITING ? engineWaitReason : undefined,
+      eventRegister: engineEventReg,
       architectureSnapshot: this.executionEngine ? this.executionEngine.getStateSnapshot() : undefined,
     };
   }
@@ -181,6 +233,12 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
         this.accessContext,
         this.currentPc
       );
+      if (this.eventBroadcaster) {
+        this.executionEngine.setEventSignaler?.(this.eventBroadcaster);
+      }
+      if (this.wakeCallback) {
+        this.executionEngine.setWakeNotifier?.(this.wakeCallback);
+      }
       return true;
     }
     // Architectural boundary: only families with genuine execution backends can be switched to
@@ -189,8 +247,8 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
 
   attachBusMaster(bus: IFrt64BusMaster): void {
     this.busMaster = bus;
-    if (this.executionEngine && 'setBusMaster' in this.executionEngine) {
-      (this.executionEngine as unknown as {setBusMaster(b: IFrt64BusMaster): void}).setBusMaster(bus);
+    if (this.executionEngine) {
+      this.executionEngine.setBusMaster?.(bus);
     }
     if (this.autoAttachEngine && !this.executionEngine) {
       this.executionEngine = createExecutionEngine(
@@ -200,6 +258,12 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
         this.accessContext,
         this.currentResetVector
       );
+      if (this.eventBroadcaster) {
+        this.executionEngine.setEventSignaler?.(this.eventBroadcaster);
+      }
+      if (this.wakeCallback) {
+        this.executionEngine.setWakeNotifier?.(this.wakeCallback);
+      }
     }
   }
 
@@ -210,6 +274,8 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     }
     this.currentPc = this.currentResetVector;
     this.cyclesExecuted = 0n;
+    this.waitReasonState = undefined;
+    this.pendingIrqs.clear();
     // Primary core enters RESET state ready to boot; secondary cores remain PARKED
     this.runState = this.isPrimary ? Frt64CoreRunState.RESET : Frt64CoreRunState.PARKED;
     if (this.executionEngine) {
@@ -219,13 +285,14 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
 
   halt(): void {
     this.runState = Frt64CoreRunState.HALTED;
+    this.waitReasonState = undefined;
     if (this.executionEngine) {
       this.executionEngine.halt();
     }
   }
 
   pause(): void {
-    if (this.runState === Frt64CoreRunState.RUNNING) {
+    if (this.runState === Frt64CoreRunState.RUNNING || this.runState === Frt64CoreRunState.WAITING) {
       this.runState = Frt64CoreRunState.PAUSED;
       if (this.executionEngine) {
         this.executionEngine.pause();
@@ -240,6 +307,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       this.runState === Frt64CoreRunState.PAUSED
     ) {
       this.runState = Frt64CoreRunState.RUNNING;
+      this.waitReasonState = undefined;
       if (this.executionEngine) {
         this.executionEngine.resume();
       }
@@ -248,6 +316,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
 
   park(): void {
     this.runState = Frt64CoreRunState.PARKED;
+    this.waitReasonState = undefined;
     if (this.executionEngine) {
       this.executionEngine.pause();
     }
@@ -266,11 +335,52 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       }
     }
     this.runState = Frt64CoreRunState.RESET;
+    this.waitReasonState = undefined;
     return true;
   }
 
-  signalInterrupt(_irqVector: number): void {
-    void _irqVector;
+  signalInterrupt(irqVector: number, level = true): void {
+    if (level) {
+      this.pendingIrqs.add(irqVector);
+    } else {
+      this.pendingIrqs.delete(irqVector);
+    }
+    if (this.executionEngine) {
+      this.executionEngine.signalInterrupt?.(irqVector, level);
+    }
+    if (level && this.runState === Frt64CoreRunState.WAITING) {
+      this.runState = Frt64CoreRunState.RUNNING;
+      this.waitReasonState = undefined;
+      this.wakeCallback?.();
+    }
+  }
+
+  signalEvent(): void {
+    if (this.executionEngine) {
+      this.executionEngine.signalEvent?.();
+    }
+    if (this.runState === Frt64CoreRunState.WAITING && this.waitReason === 'WFE') {
+      this.runState = Frt64CoreRunState.RUNNING;
+      this.waitReasonState = undefined;
+      this.wakeCallback?.();
+    }
+  }
+
+  setEventRegister(value: boolean): void {
+    if (this.executionEngine) {
+      this.executionEngine.setEventRegister?.(value);
+    }
+  }
+
+  wake(): void {
+    if (this.runState === Frt64CoreRunState.WAITING) {
+      this.runState = Frt64CoreRunState.RUNNING;
+      this.waitReasonState = undefined;
+      if (this.executionEngine) {
+        this.executionEngine.wake?.();
+      }
+      this.wakeCallback?.();
+    }
   }
 
   readPhysical(address: Address64, sizeBytes: number): Uint8Array {
@@ -340,6 +450,17 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     if (this.runState === Frt64CoreRunState.FAULT) {
       return {executed: false, state: this.runState, reason: 'FAULT', pc: this.currentPc, cyclesExecuted: this.cyclesExecuted};
     }
+    if (this.runState === Frt64CoreRunState.WAITING) {
+      const waitReason = this.waitReason;
+      return {
+        executed: false,
+        state: this.runState,
+        reason: waitReason === 'WFE' ? 'WAITING_WFE' : 'WAITING_WFI',
+        waitReason,
+        pc: this.currentPc,
+        cyclesExecuted: this.cyclesExecuted,
+      };
+    }
 
     if (!this.executionEngine) {
       return {
@@ -351,6 +472,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
 
     const res = this.executionEngine.step();
     this.runState = res.state;
+    this.waitReasonState = res.waitReason;
     if (res.pc !== undefined) {
       this.currentPc = res.pc;
     }
@@ -362,6 +484,7 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
       executed: res.executed,
       state: this.runState,
       reason: res.reason,
+      waitReason: this.waitReasonState,
       cyclesExecuted: this.cyclesExecuted,
       pc: this.currentPc,
       opcode: res.opcode,
@@ -380,11 +503,22 @@ export class Frt64CoreBoundary implements IFrt64CoreBoundary {
     if (this.runState === Frt64CoreRunState.FAULT) {
       return {instructionsExecuted: 0, cyclesExecuted: 0n, finalState: this.runState, lastPc: this.currentPc, stoppedReason: 'FAULT'};
     }
+    if (this.runState === Frt64CoreRunState.WAITING) {
+      const waitReason = this.waitReason;
+      return {
+        instructionsExecuted: 0,
+        cyclesExecuted: 0n,
+        finalState: this.runState,
+        lastPc: this.currentPc,
+        stoppedReason: waitReason === 'WFE' ? 'WAITING_WFE' : 'WAITING_WFI',
+      };
+    }
     if (!this.executionEngine) {
       return {instructionsExecuted: 0, cyclesExecuted: 0n, finalState: this.runState, lastPc: this.currentPc, stoppedReason: 'NO_EXECUTION_ENGINE_ATTACHED'};
     }
     const res = this.executionEngine.executeBatch(maxInstructions);
     this.runState = res.finalState;
+    this.waitReasonState = this.executionEngine.waitReason;
     this.currentPc = res.lastPc;
     this.cyclesExecuted += res.cyclesExecuted;
     return res;
@@ -396,6 +530,7 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
   readonly primaryCoreId: number;
   readonly defaultFamily: Frt64ExecutionFamily;
   private busMaster: IFrt64BusMaster | null = null;
+  private readonly wakeListeners = new Set<() => void>();
 
   constructor(config: Frt64TopologyConfig) {
     if (config.coreCount <= 0) {
@@ -415,16 +550,26 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
 
     for (let i = 0; i < config.coreCount; i++) {
       const clusterId = Math.floor(i / coresPerCluster);
-      this.cores.push(
-        new Frt64CoreBoundary({
-          coreId: i,
-          clusterId,
-          isPrimary: i === this.primaryCoreId,
-          initialFamily: config.defaultFamily,
-          resetVector: config.defaultResetVector,
-          autoAttachEngine: config.autoAttachEngine,
-        })
-      );
+      const core = new Frt64CoreBoundary({
+        coreId: i,
+        clusterId,
+        isPrimary: i === this.primaryCoreId,
+        initialFamily: config.defaultFamily,
+        resetVector: config.defaultResetVector,
+        autoAttachEngine: config.autoAttachEngine,
+      });
+
+      // Wire core event signaling through the CPU boundary topology
+      core.setEventBroadcaster((broadcast) => {
+        this.broadcastEvent(core.coreId, broadcast);
+      });
+
+      // Wire core wakeup callback to notify pump listeners
+      core.setWakeCallback(() => {
+        this.notifyWake();
+      });
+
+      this.cores.push(core);
     }
   }
 
@@ -534,9 +679,32 @@ export class Frt64CpuBoundary implements IFrt64CpuBoundary {
     return core.unpark(entryVector);
   }
 
-  signalGlobalInterrupt(irqVector: number): void {
+  signalGlobalInterrupt(irqVector: number, level = true): void {
     for (const core of this.cores) {
-      core.signalInterrupt(irqVector);
+      core.signalInterrupt(irqVector, level);
+    }
+  }
+
+  broadcastEvent(sourceCoreId: number, broadcast: boolean): void {
+    if (broadcast) {
+      for (const core of this.cores) {
+        core.signalEvent();
+      }
+    } else {
+      this.cores[sourceCoreId]?.signalEvent();
+    }
+  }
+
+  addWakeListener(listener: () => void): () => void {
+    this.wakeListeners.add(listener);
+    return () => {
+      this.wakeListeners.delete(listener);
+    };
+  }
+
+  private notifyWake(): void {
+    for (const listener of this.wakeListeners) {
+      listener();
     }
   }
 }

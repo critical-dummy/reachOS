@@ -11,8 +11,30 @@ import {
   ExecutionStepResult,
   Frt64CoreRunState,
   Frt64ExecutionFamily,
+  Frt64WaitReason,
 } from './types';
 import {IFrt64BusMaster} from './boundary';
+
+export class MemoryAccessFaultError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemoryAccessFaultError';
+  }
+}
+
+export class InvalidInstructionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidInstructionError';
+  }
+}
+
+export class UnsupportedInstructionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedInstructionError';
+  }
+}
 
 export interface BoundedBatchResult {
   instructionsExecuted: number;
@@ -27,6 +49,8 @@ export interface IFrt64ExecutionEngine {
   readonly family: Frt64ExecutionFamily;
   readonly pc: Address64;
   readonly state: Frt64CoreRunState;
+  readonly eventRegister?: boolean;
+  readonly waitReason?: Frt64WaitReason;
   setProgramCounter(address: Address64): void;
   getRegister(nameOrIndex: string | number): bigint;
   setRegister(nameOrIndex: string | number, value: bigint): void;
@@ -38,6 +62,15 @@ export interface IFrt64ExecutionEngine {
   step(): ExecutionStepResult;
   executeBatch(maxInstructions: number): BoundedBatchResult;
   setBusMaster?(bus: IFrt64BusMaster): void;
+  setEventSignaler?(signaler: (broadcast: boolean) => void): void;
+  setWakeNotifier?(notifier: () => void): void;
+  signalInterrupt?(irqVector: number, level?: boolean): void;
+  signalEvent?(): void;
+  wake?(): void;
+  getEventRegister?(): boolean;
+  setEventRegister?(value: boolean): void;
+  getWaitReason?(): Frt64WaitReason | undefined;
+  hasPendingInterrupt?(): boolean;
 }
 
 const MASK_64 = 0xffff_ffff_ffff_ffffn;
@@ -48,6 +81,12 @@ const SIGN_BIT_32 = 31n;
 /**
  * Genuine AArch64 (ARM 64-bit) Execution Engine.
  * Executes genuine AArch64 machine instructions fetched over IFrt64BusMaster.
+ *
+ * ARCHITECTURAL LIMITATION NOTE:
+ * This engine provides a deterministic, testable minimal event/interrupt wakeup mechanism
+ * (Event Register, WFE, WFI, SEV, SEVL, and level-triggered IRQ wakeups).
+ * It does NOT implement full ARMv8-A exception levels (EL0-EL3), VBAR_ELx vector routing,
+ * DAIF interrupt masking, GIC acknowledge/EOI, timers, or preemptive exception return.
  */
 export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
   readonly family = Frt64ExecutionFamily.ARM_64;
@@ -55,6 +94,16 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
   pc: Address64;
   state: Frt64CoreRunState = Frt64CoreRunState.RESET;
   cyclesExecuted = 0n;
+
+  // 1-bit Event Register per ARMv8-A architecture
+  eventRegister = false;
+  // Recorded wait reason ('WFE' | 'WFI') when in WAITING state
+  waitReason?: Frt64WaitReason = undefined;
+  // Currently asserted bus IRQ vectors delivered to this core
+  private readonly pendingIrqs = new Set<number>();
+
+  private eventSignaler?: (broadcast: boolean) => void;
+  private wakeNotifier?: () => void;
 
   // 31 General-Purpose 64-bit Registers (X0 - X30)
   private readonly x = new BigUint64Array(31);
@@ -85,6 +134,76 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
 
   setBusMaster(bus: IFrt64BusMaster): void {
     this.busMaster = bus;
+  }
+
+  setEventSignaler(signaler: (broadcast: boolean) => void): void {
+    this.eventSignaler = signaler;
+  }
+
+  setWakeNotifier(notifier: () => void): void {
+    this.wakeNotifier = notifier;
+  }
+
+  getEventRegister(): boolean {
+    return this.eventRegister;
+  }
+
+  setEventRegister(value: boolean): void {
+    this.eventRegister = value;
+  }
+
+  getWaitReason(): Frt64WaitReason | undefined {
+    return this.waitReason;
+  }
+
+  hasPendingInterrupt(): boolean {
+    return this.pendingIrqs.size > 0;
+  }
+
+  getPendingInterrupts(): readonly number[] {
+    return Array.from(this.pendingIrqs);
+  }
+
+  signalInterrupt(irqVector: number, level = true): void {
+    if (level) {
+      this.pendingIrqs.add(irqVector);
+      if (this.state === Frt64CoreRunState.WAITING) {
+        this.wake();
+      }
+    } else {
+      this.pendingIrqs.delete(irqVector);
+    }
+  }
+
+  signalEvent(): void {
+    this.eventRegister = true;
+    if (this.state === Frt64CoreRunState.WAITING && this.waitReason === 'WFE') {
+      this.wake();
+    }
+  }
+
+  wake(): void {
+    if (this.state === Frt64CoreRunState.WAITING) {
+      this.state = Frt64CoreRunState.RUNNING;
+      this.waitReason = undefined;
+      this.wakeNotifier?.();
+    }
+  }
+
+  private readPhysicalSafe(address: Address64, sizeBytes: number): Uint8Array {
+    try {
+      return this.busMaster.readPhysical(address, sizeBytes, this.accessContext);
+    } catch (err: unknown) {
+      throw new MemoryAccessFaultError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private writePhysicalSafe(address: Address64, data: Uint8Array): void {
+    try {
+      this.busMaster.writePhysical(address, data, this.accessContext);
+    } catch (err: unknown) {
+      throw new MemoryAccessFaultError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   setProgramCounter(address: Address64): void {
@@ -213,6 +332,9 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
     this.c = false;
     this.v = false;
     this.cyclesExecuted = 0n;
+    this.eventRegister = false;
+    this.waitReason = undefined;
+    this.pendingIrqs.clear();
     this.state = Frt64CoreRunState.RESET;
   }
 
@@ -257,6 +379,9 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
       },
       cyclesExecuted: this.cyclesExecuted.toString(),
       state: this.state,
+      eventRegister: this.eventRegister,
+      waitReason: this.waitReason,
+      pendingIrqs: Array.from(this.pendingIrqs),
     };
   }
 
@@ -336,6 +461,16 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
     if (this.state === Frt64CoreRunState.FAULT) {
       return {executed: false, state: this.state, reason: 'FAULT', pc: this.pc, cyclesExecuted: this.cyclesExecuted};
     }
+    if (this.state === Frt64CoreRunState.WAITING) {
+      return {
+        executed: false,
+        state: this.state,
+        reason: this.waitReason === 'WFE' ? 'WAITING_WFE' : 'WAITING_WFI',
+        waitReason: this.waitReason,
+        pc: this.pc,
+        cyclesExecuted: this.cyclesExecuted,
+      };
+    }
 
     // AArch64 requires 4-byte PC alignment
     if (this.pc % 4n !== 0n) {
@@ -378,15 +513,97 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
     let disassembly = 'unknown';
 
     try {
-      // 1. NOP / SYSTEM HINT: 0xd503201f
-      if (opcode === 0xd503201f) {
-        disassembly = 'nop';
-      } else if (opcode === 0xd503203f) {
-        disassembly = 'yield';
-      } else if (opcode === 0xd503205f) {
-        disassembly = 'wfe';
-      } else if (opcode === 0xd503207f) {
-        disassembly = 'wfi';
+      // 1. NOP / YIELD / WFE / WFI / SEV / SEVL / HINT: 1101 0101 0000 0011 0010 [CRm:4] [op2:3] 11111 (0xd503201f base)
+      if (((opcode & 0xfffff01f) >>> 0) === 0xd503201f) {
+        const imm7 = (opcode >> 5) & 0x7f;
+        if (imm7 === 0) {
+          // NOP
+          disassembly = 'nop';
+        } else if (imm7 === 1) {
+          // YIELD: execution hint; continue execution
+          disassembly = 'yield';
+        } else if (imm7 === 2) {
+          // WFE: Wait For Event
+          disassembly = 'wfe';
+          if (this.eventRegister || this.pendingIrqs.size > 0) {
+            // Event Register is set or interrupt is pending: clear Event Register and complete immediately
+            this.eventRegister = false;
+            this.pc = nextPc;
+            this.cyclesExecuted += 1n;
+            this.state = Frt64CoreRunState.RUNNING;
+            return {
+              executed: true,
+              state: this.state,
+              reason: 'OK',
+              cyclesExecuted: this.cyclesExecuted,
+              pc: this.pc,
+              opcode,
+              disassembly,
+            };
+          } else {
+            // Enter WFE wait state
+            this.pc = nextPc;
+            this.cyclesExecuted += 1n;
+            this.state = Frt64CoreRunState.WAITING;
+            this.waitReason = 'WFE';
+            return {
+              executed: true,
+              state: this.state,
+              reason: 'WAITING_WFE',
+              waitReason: 'WFE',
+              cyclesExecuted: this.cyclesExecuted,
+              pc: this.pc,
+              opcode,
+              disassembly,
+            };
+          }
+        } else if (imm7 === 3) {
+          // WFI: Wait For Interrupt
+          disassembly = 'wfi';
+          if (this.pendingIrqs.size > 0) {
+            // Interrupt is already asserted: complete instruction immediately without waiting
+            this.pc = nextPc;
+            this.cyclesExecuted += 1n;
+            this.state = Frt64CoreRunState.RUNNING;
+            return {
+              executed: true,
+              state: this.state,
+              reason: 'OK',
+              cyclesExecuted: this.cyclesExecuted,
+              pc: this.pc,
+              opcode,
+              disassembly,
+            };
+          } else {
+            // Enter WFI wait state
+            this.pc = nextPc;
+            this.cyclesExecuted += 1n;
+            this.state = Frt64CoreRunState.WAITING;
+            this.waitReason = 'WFI';
+            return {
+              executed: true,
+              state: this.state,
+              reason: 'WAITING_WFI',
+              waitReason: 'WFI',
+              cyclesExecuted: this.cyclesExecuted,
+              pc: this.pc,
+              opcode,
+              disassembly,
+            };
+          }
+        } else if (imm7 === 4) {
+          // SEV: Send Event globally to all cores in the CPU topology
+          disassembly = 'sev';
+          this.eventRegister = true;
+          this.eventSignaler?.(true);
+        } else if (imm7 === 5) {
+          // SEVL: Send Event Locally to issuing core
+          disassembly = 'sevl';
+          this.eventRegister = true;
+          this.eventSignaler?.(false);
+        } else {
+          disassembly = `hint #0x${imm7.toString(16)}`;
+        }
       }
 
       // 2. HLT (Halt execution): 0xd4400000 | (imm16 << 5)
@@ -755,12 +972,12 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
           for (let i = 0; i < byteCount; i++) {
             buf[i] = Number((val >> BigInt(i * 8)) & 0xffn);
           }
-          this.busMaster.writePhysical(targetAddr, buf, this.accessContext);
+          this.writePhysicalSafe(targetAddr, buf);
           const mnemonic = ['strb', 'strh', 'str', 'str'][size];
           disassembly = `${mnemonic} ${size === 3 ? 'x' : 'w'}${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
         } else if (opc === 1) {
           // LOAD (LDRB, LDRH, LDR)
-          const buf = this.busMaster.readPhysical(targetAddr, byteCount, this.accessContext);
+          const buf = this.readPhysicalSafe(targetAddr, byteCount);
           let val = 0n;
           for (let i = 0; i < byteCount; i++) {
             val |= BigInt(buf[i]) << BigInt(i * 8);
@@ -769,7 +986,7 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
           const mnemonic = ['ldrb', 'ldrh', 'ldr', 'ldr'][size];
           disassembly = `${mnemonic} ${size === 3 ? 'x' : 'w'}${rt}, [${rn === 31 ? 'sp' : 'x' + rn}, #0x${offset.toString(16)}]`;
         } else {
-          throw new Error(`Unsupported load/store opcode variant: opc=${opc}`);
+          throw new UnsupportedInstructionError(`Unsupported load/store opcode variant: opc=${opc}`);
         }
       }
 
@@ -795,8 +1012,8 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
 
         if (isLoad) {
           // LDP
-          const buf1 = this.busMaster.readPhysical(targetAddr, byteCount, this.accessContext);
-          const buf2 = this.busMaster.readPhysical(targetAddr + BigInt(byteCount), byteCount, this.accessContext);
+          const buf1 = this.readPhysicalSafe(targetAddr, byteCount);
+          const buf2 = this.readPhysicalSafe(targetAddr + BigInt(byteCount), byteCount);
           let val1 = 0n;
           let val2 = 0n;
           for (let i = 0; i < byteCount; i++) {
@@ -816,8 +1033,8 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
             buf1[i] = Number((val1 >> BigInt(i * 8)) & 0xffn);
             buf2[i] = Number((val2 >> BigInt(i * 8)) & 0xffn);
           }
-          this.busMaster.writePhysical(targetAddr, buf1, this.accessContext);
-          this.busMaster.writePhysical(targetAddr + BigInt(byteCount), buf2, this.accessContext);
+          this.writePhysicalSafe(targetAddr, buf1);
+          this.writePhysicalSafe(targetAddr + BigInt(byteCount), buf2);
           disassembly = `stp ${opc === 2 ? 'x' : 'w'}${rt}, ${opc === 2 ? 'x' : 'w'}${rt2}, [${rn === 31 ? 'sp' : 'x' + rn}]`;
         }
 
@@ -844,11 +1061,44 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
     } catch (err: unknown) {
       this.state = Frt64CoreRunState.FAULT;
       const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof MemoryAccessFaultError) {
+        return {
+          executed: false,
+          state: this.state,
+          reason: 'MEMORY_FAULT',
+          fault: `Memory fault executing instruction 0x${opcode.toString(16)} at ${formatAddress(currentPc)}: ${msg}`,
+          pc: this.pc,
+          opcode,
+          cyclesExecuted: this.cyclesExecuted,
+        };
+      }
+      if (err instanceof InvalidInstructionError) {
+        return {
+          executed: false,
+          state: this.state,
+          reason: 'INVALID_INSTRUCTION',
+          fault: msg,
+          pc: this.pc,
+          opcode,
+          cyclesExecuted: this.cyclesExecuted,
+        };
+      }
+      if (err instanceof UnsupportedInstructionError) {
+        return {
+          executed: false,
+          state: this.state,
+          reason: 'UNSUPPORTED_INSTRUCTION',
+          fault: msg,
+          pc: this.pc,
+          opcode,
+          cyclesExecuted: this.cyclesExecuted,
+        };
+      }
       return {
         executed: false,
         state: this.state,
-        reason: 'MEMORY_FAULT',
-        fault: `Memory fault executing instruction 0x${opcode.toString(16)} at ${formatAddress(currentPc)}: ${msg}`,
+        reason: 'UNSUPPORTED_INSTRUCTION',
+        fault: `Execution error for instruction 0x${opcode.toString(16)} at ${formatAddress(currentPc)}: ${msg}`,
         pc: this.pc,
         opcode,
         cyclesExecuted: this.cyclesExecuted,
@@ -888,6 +1138,10 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         stoppedReason = 'FAULT';
         break;
       }
+      if (this.state === Frt64CoreRunState.WAITING) {
+        stoppedReason = this.waitReason === 'WFE' ? 'WAITING_WFE' : 'WAITING_WFI';
+        break;
+      }
 
       const res = this.step();
       if (!res.executed) {
@@ -895,6 +1149,14 @@ export class AArch64ExecutionEngine implements IFrt64ExecutionEngine {
         break;
       }
       count++;
+      if (
+        res.state === Frt64CoreRunState.WAITING ||
+        res.state === Frt64CoreRunState.HALTED ||
+        res.state === Frt64CoreRunState.FAULT
+      ) {
+        stoppedReason = res.reason;
+        break;
+      }
     }
 
     return {

@@ -20,7 +20,10 @@ export enum Frt64CoreRunState {
   RUNNING = 'RUNNING',
   PAUSED = 'PAUSED',
   FAULT = 'FAULT',
+  WAITING = 'WAITING',
 }
+
+export type Frt64WaitReason = 'WFE' | 'WFI';
 
 export interface Frt64CoreConfig {
   coreId: number;
@@ -49,6 +52,8 @@ export interface Frt64CoreStatus {
   pc: Address64;
   resetVector: Address64;
   hasEngine?: boolean;
+  waitReason?: Frt64WaitReason;
+  eventRegister?: boolean;
   architectureSnapshot?: Record<string, unknown>;
 }
 
@@ -71,12 +76,16 @@ export type ExecutionStepReason =
   | 'UNSUPPORTED_INSTRUCTION'
   | 'MEMORY_FAULT'
   | 'PAUSED'
-  | 'RESET';
+  | 'RESET'
+  | 'WAITING_WFE'
+  | 'WAITING_WFI'
+  | 'WAITING';
 
 export interface ExecutionStepResult {
   executed: boolean;
   state: Frt64CoreRunState;
   reason: ExecutionStepReason;
+  waitReason?: Frt64WaitReason;
   cyclesExecuted?: bigint;
   pc?: Address64;
   opcode?: number;
